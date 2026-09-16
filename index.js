@@ -1,19 +1,18 @@
 import ccxt from 'ccxt';
 import pkg from 'technicalindicators';
-const { EMA } = pkg;
+const { EMA, ATR } = pkg;
 import TelegramBot from 'node-telegram-bot-api';
 
 const token = process.env.TELEGRAM_TOKEN;
 const chatId = process.env.CHAT_ID;
 const bot = new TelegramBot(token);
 
-// Using Bitget to bypass GitHub IP restrictions
 const exchange = new ccxt.bitget({
     'options': { 'defaultType': 'swap' },
     'enableRateLimit': true
 });
 
-// ONLY 15m timeframe as requested
+// 15m Scalping / Day Trading
 const timeframes = ['15m'];
 
 async function getFilteredPairs() {
@@ -27,13 +26,9 @@ async function getFilteredPairs() {
                 filteredSymbols.push(symbol);
             }
         }
-        
-        // Sort by volume and pick top 250 active coins
         filteredSymbols.sort((a, b) => tickers[b].quoteVolume - tickers[a].quoteVolume);
         return filteredSymbols.slice(0, 250); 
-    } catch (e) { 
-        return []; 
-    }
+    } catch (e) { return []; }
 }
 
 async function analyzeCoin(symbol, timeframe) {
@@ -41,56 +36,83 @@ async function analyzeCoin(symbol, timeframe) {
         const candles = await exchange.fetchOHLCV(symbol, timeframe, undefined, 100);
         if (candles.length < 60) return false;
 
+        const highPrices = candles.map(c => c[2]);
+        const lowPrices = candles.map(c => c[3]);
         const closePrices = candles.map(c => c[4]);
-        
-        // Calculate EMAs
+
         const ema20Arr = EMA.calculate({ period: 20, values: closePrices });
         const ema50Arr = EMA.calculate({ period: 50, values: closePrices });
+        const atrArr = ATR.calculate({ high: highPrices, low: lowPrices, close: closePrices, period: 14 });
 
-        // We use length - 2 for the last CLOSED candle
-        // We use length - 3 for the PREVIOUS closed candle
-        // This prevents fake signals from open/moving candles
+        // T-1: Current Closed Candle
+        const currentLow = lowPrices[lowPrices.length - 2];
+        const currentHigh = highPrices[highPrices.length - 2];
+        const currentClose = closePrices[closePrices.length - 2];
         const currentEma20 = ema20Arr[ema20Arr.length - 2];
-        const prevEma20 = ema20Arr[ema20Arr.length - 3];
-        
         const currentEma50 = ema50Arr[ema50Arr.length - 2];
-        const prevEma50 = ema50Arr[ema50Arr.length - 3];
+        const currentAtr = atrArr[atrArr.length - 1];
 
-        const lastClosedPrice = closePrices[closePrices.length - 2];
+        // T-2: Previous Closed Candle
+        const prevLow = lowPrices[lowPrices.length - 3];
+        const prevHigh = highPrices[highPrices.length - 3];
+        const prevEma20 = ema20Arr[ema20Arr.length - 3];
 
         if (!currentEma20 || !currentEma50) return false;
 
         let side = "";
         let emoji = "";
-        let alertType = "";
 
-        // CROSSOVER LOGIC
-        // LONG: EMA 20 was below EMA 50, but now crossed ABOVE EMA 50
-        if (prevEma20 <= prevEma50 && currentEma20 > currentEma50) {
-            side = "LONG Opportunity";
-            emoji = "🟢";
-            alertType = "🔥 BULLISH CROSSOVER (EMA 20 Crossed Above EMA 50)";
-        } 
-        // SHORT: EMA 20 was above EMA 50, but now crossed BELOW EMA 50
-        else if (prevEma20 >= prevEma50 && currentEma20 < currentEma50) {
-            side = "SHORT Opportunity";
-            emoji = "🔴";
-            alertType = "🔥 BEARISH CROSSOVER (EMA 20 Crossed Below EMA 50)";
+        // --- PERFECT RETEST LOGIC ---
+
+        // 1. LONG RETEST
+        // Condition A: Uptrend (EMA 20 > EMA 50)
+        // Condition B: Prev candle was completely above EMA 20 (Flying)
+        // Condition C: Current candle's Low touched/dipped below EMA 20 (Retest)
+        // Condition D: Current candle Closed ABOVE EMA 20 (Successful Bounce/Rejection)
+        if (currentEma20 > currentEma50) {
+            if (prevLow > prevEma20 && currentLow <= currentEma20 && currentClose > currentEma20) {
+                side = "LONG (EMA 20 Retest)";
+                emoji = "🟢";
+            }
+        }
+
+        // 2. SHORT RETEST
+        // Condition A: Downtrend (EMA 20 < EMA 50)
+        // Condition B: Prev candle was completely below EMA 20 (Falling)
+        // Condition C: Current candle's High touched/poked above EMA 20 (Retest)
+        // Condition D: Current candle Closed BELOW EMA 20 (Successful Rejection)
+        else if (currentEma20 < currentEma50) {
+            if (prevHigh < prevEma20 && currentHigh >= currentEma20 && currentClose < currentEma20) {
+                side = "SHORT (EMA 20 Retest)";
+                emoji = "🔴";
+            }
         }
 
         if (side) {
             const baseAsset = symbol.split('/')[0]; 
             const binanceChartUrl = `https://www.tradingview.com/chart/?symbol=BINANCE:${baseAsset}USDT.P`;
             
+            // Auto TP/SL Calculation based on ATR (Risk:Reward = 1:2)
+            let sl, tp1;
+            if (side.includes("LONG")) {
+                sl = currentClose - (currentAtr * 1.5);
+                tp1 = currentClose + (currentAtr * 3.0);
+            } else {
+                sl = currentClose + (currentAtr * 1.5);
+                tp1 = currentClose - (currentAtr * 3.0);
+            }
+            
             const message = `
 ${emoji} *${side}*
 --------------------------
-⚡ *Signal:* ${alertType}
+⚡ *Signal:* 🔥 PERFECT RETEST (Sniper Entry)
 🪙 *Coin:* #${baseAsset}
 ⏰ *Timeframe:* ${timeframe}
-💰 *Close Price:* ${lastClosedPrice}
+💰 *Entry Price:* ${currentClose}
 📈 *EMA 20:* ${currentEma20.toFixed(4)}
-📉 *EMA 50:* ${currentEma50.toFixed(4)}
+--------------------------
+💵 *Take Profit:* ${tp1.toPrecision(5)}
+🛑 *Stop Loss:* ${sl.toPrecision(5)}
 --------------------------
 🔗 [Open Binance Chart](${binanceChartUrl})`;
             
@@ -106,7 +128,7 @@ async function run() {
         const coins = await getFilteredPairs();
         let totalSignals = 0;
         
-        await bot.sendMessage(chatId, `🔍 *15m Crossover Scanner Started*\nStrategy: EMA 20 / EMA 50 Cross\nScanning Top ${coins.length} Coins...`);
+        await bot.sendMessage(chatId, `🔍 *15m Retest Scanner Started*\nStrategy: EMA 20 Pullback & Bounce\nScanning Top ${coins.length} Coins...`);
 
         for (const tf of timeframes) {
             for (const coin of coins) {
@@ -117,9 +139,9 @@ async function run() {
         }
         
         if (totalSignals === 0) {
-            await bot.sendMessage(chatId, `✅ Scan Finished. No new EMA Crossovers found right now.`);
+            await bot.sendMessage(chatId, `✅ Scan Finished. No Retest setups found. Waiting for pullbacks...`);
         } else {
-            await bot.sendMessage(chatId, `✅ Scan Finished. Total Crossovers Found: ${totalSignals}`);
+            await bot.sendMessage(chatId, `✅ Scan Finished. Found ${totalSignals} Perfect Retest Signals.`);
         }
     } catch (error) { 
         console.error("Run Error:", error.message); 
