@@ -1,6 +1,7 @@
 import ccxt from 'ccxt';
 import pkg from 'technicalindicators';
-const { EMA, ATR } = pkg;
+// Added RSI and ADX along with EMA and ATR
+const { EMA, ATR, RSI, ADX } = pkg;
 import TelegramBot from 'node-telegram-bot-api';
 
 const token = process.env.TELEGRAM_TOKEN;
@@ -36,6 +37,7 @@ async function analyzeCoin(symbol, timeframe) {
         const candles = await exchange.fetchOHLCV(symbol, timeframe, undefined, 100);
         if (candles.length < 60) return false;
 
+        const openPrices = candles.map(c => c[1]);
         const highPrices = candles.map(c => c[2]);
         const lowPrices = candles.map(c => c[3]);
         const closePrices = candles.map(c => c[4]);
@@ -43,48 +45,71 @@ async function analyzeCoin(symbol, timeframe) {
         const ema20Arr = EMA.calculate({ period: 20, values: closePrices });
         const ema50Arr = EMA.calculate({ period: 50, values: closePrices });
         const atrArr = ATR.calculate({ high: highPrices, low: lowPrices, close: closePrices, period: 14 });
+        const rsiArr = RSI.calculate({ period: 14, values: closePrices });
+        const adxArr = ADX.calculate({ high: highPrices, low: lowPrices, close: closePrices, period: 14 });
 
-        // T-1: Current Closed Candle
+        // T-1: Current Closed Candle Data
         const currentLow = lowPrices[lowPrices.length - 2];
         const currentHigh = highPrices[highPrices.length - 2];
         const currentClose = closePrices[closePrices.length - 2];
+        
         const currentEma20 = ema20Arr[ema20Arr.length - 2];
         const currentEma50 = ema50Arr[ema50Arr.length - 2];
         const currentAtr = atrArr[atrArr.length - 1];
+        const currentRsi = rsiArr[rsiArr.length - 2];
+        
+        const currentAdx = adxArr[adxArr.length - 2].adx;
+        const prevAdx = adxArr[adxArr.length - 3].adx;
 
-        // T-2: Previous Closed Candle
+        // T-2: Previous Closed Candle Data
         const prevLow = lowPrices[lowPrices.length - 3];
         const prevHigh = highPrices[highPrices.length - 3];
         const prevEma20 = ema20Arr[ema20Arr.length - 3];
 
-        if (!currentEma20 || !currentEma50) return false;
+        if (!currentEma20 || !currentEma50 || !currentRsi || !currentAdx) return false;
 
         let side = "";
         let emoji = "";
+        let strategyName = "";
+        let adxStatus = "";
 
-        // --- PERFECT RETEST LOGIC ---
+        // ADX Exhaustion Logic (Trend is dying)
+        const isExhausted = prevAdx > 25 && currentAdx < prevAdx;
 
-        // 1. LONG RETEST
-        // Condition A: Uptrend (EMA 20 > EMA 50)
-        // Condition B: Prev candle was completely above EMA 20 (Flying)
-        // Condition C: Current candle's Low touched/dipped below EMA 20 (Retest)
-        // Condition D: Current candle Closed ABOVE EMA 20 (Successful Bounce/Rejection)
-        if (currentEma20 > currentEma50) {
+        // ==========================================
+        // STRATEGY 1: RSI EXTREME REVERSAL (Top/Bottom)
+        // ==========================================
+        if (currentRsi >= 10 && currentRsi <= 30 && isExhausted) {
+            side = "LONG Opportunity";
+            emoji = "🟢";
+            strategyName = "🔥 BOTTOM REVERSAL (RSI Oversold + ADX)";
+            adxStatus = "Sellers Exhausted (Sniper Entry)";
+        } 
+        else if (currentRsi >= 70 && currentRsi <= 100 && isExhausted) {
+            side = "SHORT Opportunity";
+            emoji = "🔴";
+            strategyName = "🔥 TOP REVERSAL (RSI Overbought + ADX)";
+            adxStatus = "Buyers Exhausted (Sniper Entry)";
+        }
+        // ==========================================
+        // STRATEGY 2: EMA 20 PERFECT RETEST
+        // ==========================================
+        // Long Retest
+        else if (currentEma20 > currentEma50) {
             if (prevLow > prevEma20 && currentLow <= currentEma20 && currentClose > currentEma20) {
-                side = "LONG (EMA 20 Retest)";
+                side = "LONG Opportunity";
                 emoji = "🟢";
+                strategyName = "📈 EMA 20 PERFECT RETEST";
+                adxStatus = currentAdx > 25 ? "Strong Trend Continuing" : "Normal Trend";
             }
         }
-
-        // 2. SHORT RETEST
-        // Condition A: Downtrend (EMA 20 < EMA 50)
-        // Condition B: Prev candle was completely below EMA 20 (Falling)
-        // Condition C: Current candle's High touched/poked above EMA 20 (Retest)
-        // Condition D: Current candle Closed BELOW EMA 20 (Successful Rejection)
+        // Short Retest
         else if (currentEma20 < currentEma50) {
             if (prevHigh < prevEma20 && currentHigh >= currentEma20 && currentClose < currentEma20) {
-                side = "SHORT (EMA 20 Retest)";
+                side = "SHORT Opportunity";
                 emoji = "🔴";
+                strategyName = "📉 EMA 20 PERFECT RETEST";
+                adxStatus = currentAdx > 25 ? "Strong Trend Continuing" : "Normal Trend";
             }
         }
 
@@ -105,10 +130,12 @@ async function analyzeCoin(symbol, timeframe) {
             const message = `
 ${emoji} *${side}*
 --------------------------
-⚡ *Signal:* 🔥 PERFECT RETEST (Sniper Entry)
+⚡ *Strategy:* ${strategyName}
+🎯 *ADX Status:* ${adxStatus}
 🪙 *Coin:* #${baseAsset}
 ⏰ *Timeframe:* ${timeframe}
 💰 *Entry Price:* ${currentClose}
+📊 *RSI (14):* ${currentRsi.toFixed(2)}
 📈 *EMA 20:* ${currentEma20.toFixed(4)}
 --------------------------
 💵 *Take Profit:* ${tp1.toPrecision(5)}
@@ -128,7 +155,7 @@ async function run() {
         const coins = await getFilteredPairs();
         let totalSignals = 0;
         
-        await bot.sendMessage(chatId, `🔍 *15m Retest Scanner Started*\nStrategy: EMA 20 Pullback & Bounce\nScanning Top ${coins.length} Coins...`);
+        await bot.sendMessage(chatId, `🔍 *15m Dual-Strategy Scanner Started*\nTarget: RSI Reversals & EMA Retests\nScanning Top ${coins.length} Coins...`);
 
         for (const tf of timeframes) {
             for (const coin of coins) {
@@ -139,9 +166,9 @@ async function run() {
         }
         
         if (totalSignals === 0) {
-            await bot.sendMessage(chatId, `✅ Scan Finished. No Retest setups found. Waiting for pullbacks...`);
+            await bot.sendMessage(chatId, `✅ Scan Finished. No Sniper or Retest setups found right now.`);
         } else {
-            await bot.sendMessage(chatId, `✅ Scan Finished. Found ${totalSignals} Perfect Retest Signals.`);
+            await bot.sendMessage(chatId, `✅ Scan Finished. Found ${totalSignals} Perfect Signals.`);
         }
     } catch (error) { 
         console.error("Run Error:", error.message); 
