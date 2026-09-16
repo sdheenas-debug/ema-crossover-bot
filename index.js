@@ -1,7 +1,6 @@
 import ccxt from 'ccxt';
 import pkg from 'technicalindicators';
-// Added RSI and ADX along with EMA and ATR
-const { EMA, ATR, RSI, ADX } = pkg;
+const { BollingerBands, ATR } = pkg;
 import TelegramBot from 'node-telegram-bot-api';
 
 const token = process.env.TELEGRAM_TOKEN;
@@ -13,8 +12,9 @@ const exchange = new ccxt.bitget({
     'enableRateLimit': true
 });
 
-// 15m Scalping / Day Trading
-const timeframes = ['15m'];
+// Removed 15m. Using highly reliable Swing Timeframes: 1h & 4h
+const timeframes = ['1h', '4h'];
+const majorCoins = ['BTC/USDT', 'BNB/USDT', 'SOL/USDT', 'ETH/USDT'];
 
 async function getFilteredPairs() {
     try {
@@ -23,120 +23,98 @@ async function getFilteredPairs() {
         
         for (const symbol in tickers) {
             const ticker = tickers[symbol];
-            if (symbol.endsWith('USDT') && ticker.quoteVolume > 500000) {
+            const base = symbol.split(':')[0];
+            const isMajor = majorCoins.includes(base);
+            const isCheap = ticker.last < 10 && symbol.endsWith('USDT');
+
+            if ((isMajor || isCheap) && ticker.quoteVolume > 500000) {
                 filteredSymbols.push(symbol);
             }
         }
         filteredSymbols.sort((a, b) => tickers[b].quoteVolume - tickers[a].quoteVolume);
-        return filteredSymbols.slice(0, 250); 
+        return filteredSymbols.slice(0, 200); 
     } catch (e) { return []; }
 }
 
 async function analyzeCoin(symbol, timeframe) {
     try {
         const candles = await exchange.fetchOHLCV(symbol, timeframe, undefined, 100);
-        if (candles.length < 60) return false;
+        if (candles.length < 50) return false;
 
-        const openPrices = candles.map(c => c[1]);
         const highPrices = candles.map(c => c[2]);
         const lowPrices = candles.map(c => c[3]);
         const closePrices = candles.map(c => c[4]);
+        const volumes = candles.map(c => c[5]);
 
-        const ema20Arr = EMA.calculate({ period: 20, values: closePrices });
-        const ema50Arr = EMA.calculate({ period: 50, values: closePrices });
+        // Bollinger Bands Calculation (20 period, 2 Standard Deviations)
+        const bbArr = BollingerBands.calculate({ period: 20, stdDev: 2, values: closePrices });
         const atrArr = ATR.calculate({ high: highPrices, low: lowPrices, close: closePrices, period: 14 });
-        const rsiArr = RSI.calculate({ period: 14, values: closePrices });
-        const adxArr = ADX.calculate({ high: highPrices, low: lowPrices, close: closePrices, period: 14 });
 
-        // T-1: Current Closed Candle Data
-        const currentLow = lowPrices[lowPrices.length - 2];
-        const currentHigh = highPrices[highPrices.length - 2];
+        // T-1: Current Closed Candle
         const currentClose = closePrices[closePrices.length - 2];
-        
-        const currentEma20 = ema20Arr[ema20Arr.length - 2];
-        const currentEma50 = ema50Arr[ema50Arr.length - 2];
+        const currentVol = volumes[volumes.length - 2];
+        const currentBB = bbArr[bbArr.length - 2];
         const currentAtr = atrArr[atrArr.length - 1];
-        const currentRsi = rsiArr[rsiArr.length - 2];
-        
-        const currentAdx = adxArr[adxArr.length - 2].adx;
-        const prevAdx = adxArr[adxArr.length - 3].adx;
 
-        // T-2: Previous Closed Candle Data
-        const prevLow = lowPrices[lowPrices.length - 3];
-        const prevHigh = highPrices[highPrices.length - 3];
-        const prevEma20 = ema20Arr[ema20Arr.length - 3];
+        // Average Volume of the last 20 candles
+        const avgVol = volumes.slice(-22, -2).reduce((a, b) => a + b, 0) / 20;
 
-        if (!currentEma20 || !currentEma50 || !currentRsi || !currentAdx) return false;
+        // Custom Rolling VWAP Calculation (Last 20 Periods)
+        let sumTPV = 0;
+        let sumVol = 0;
+        for(let i = closePrices.length - 22; i < closePrices.length - 2; i++) {
+             let typicalPrice = (highPrices[i] + lowPrices[i] + closePrices[i]) / 3;
+             sumTPV += typicalPrice * volumes[i];
+             sumVol += volumes[i];
+        }
+        const currentVWAP = sumTPV / sumVol;
+
+        if (!currentBB || !currentVWAP) return false;
 
         let side = "";
         let emoji = "";
-        let strategyName = "";
-        let adxStatus = "";
+        let breakoutType = "";
 
-        // ADX Exhaustion Logic (Trend is dying)
-        const isExhausted = prevAdx > 25 && currentAdx < prevAdx;
+        // STRATEGY LOGIC: Bollinger Band Breakout + VWAP Confirmation + Volume Spike
 
-        // ==========================================
-        // STRATEGY 1: RSI EXTREME REVERSAL (Top/Bottom)
-        // ==========================================
-        if (currentRsi >= 10 && currentRsi <= 30 && isExhausted) {
+        // 1. BULLISH BREAKOUT (LONG)
+        // Condition: Closed above Upper BB + High Volume + Above VWAP
+        if (currentClose > currentBB.upper && currentVol > (avgVol * 1.8) && currentClose > currentVWAP) {
             side = "LONG Opportunity";
             emoji = "🟢";
-            strategyName = "🔥 BOTTOM REVERSAL (RSI Oversold + ADX)";
-            adxStatus = "Sellers Exhausted (Sniper Entry)";
-        } 
-        else if (currentRsi >= 70 && currentRsi <= 100 && isExhausted) {
+            breakoutType = "🚀 BULLISH VOLATILITY BREAKOUT";
+        }
+        // 2. BEARISH BREAKOUT (SHORT)
+        // Condition: Closed below Lower BB + High Volume + Below VWAP
+        else if (currentClose < currentBB.lower && currentVol > (avgVol * 1.8) && currentClose < currentVWAP) {
             side = "SHORT Opportunity";
             emoji = "🔴";
-            strategyName = "🔥 TOP REVERSAL (RSI Overbought + ADX)";
-            adxStatus = "Buyers Exhausted (Sniper Entry)";
-        }
-        // ==========================================
-        // STRATEGY 2: EMA 20 PERFECT RETEST
-        // ==========================================
-        // Long Retest
-        else if (currentEma20 > currentEma50) {
-            if (prevLow > prevEma20 && currentLow <= currentEma20 && currentClose > currentEma20) {
-                side = "LONG Opportunity";
-                emoji = "🟢";
-                strategyName = "📈 EMA 20 PERFECT RETEST";
-                adxStatus = currentAdx > 25 ? "Strong Trend Continuing" : "Normal Trend";
-            }
-        }
-        // Short Retest
-        else if (currentEma20 < currentEma50) {
-            if (prevHigh < prevEma20 && currentHigh >= currentEma20 && currentClose < currentEma20) {
-                side = "SHORT Opportunity";
-                emoji = "🔴";
-                strategyName = "📉 EMA 20 PERFECT RETEST";
-                adxStatus = currentAdx > 25 ? "Strong Trend Continuing" : "Normal Trend";
-            }
+            breakoutType = "🩸 BEARISH VOLATILITY BREAKOUT";
         }
 
         if (side) {
             const baseAsset = symbol.split('/')[0]; 
             const binanceChartUrl = `https://www.tradingview.com/chart/?symbol=BINANCE:${baseAsset}USDT.P`;
             
-            // Auto TP/SL Calculation based on ATR (Risk:Reward = 1:2)
+            // Auto TP/SL Calculation based on ATR
             let sl, tp1;
             if (side.includes("LONG")) {
-                sl = currentClose - (currentAtr * 1.5);
+                sl = currentBB.middle; // Stop Loss at middle band
                 tp1 = currentClose + (currentAtr * 3.0);
             } else {
-                sl = currentClose + (currentAtr * 1.5);
+                sl = currentBB.middle; // Stop Loss at middle band
                 tp1 = currentClose - (currentAtr * 3.0);
             }
             
             const message = `
 ${emoji} *${side}*
 --------------------------
-⚡ *Strategy:* ${strategyName}
-🎯 *ADX Status:* ${adxStatus}
+⚡ *Signal:* ${breakoutType}
+✅ *Confirmation:* High Volume + VWAP Trend
 🪙 *Coin:* #${baseAsset}
 ⏰ *Timeframe:* ${timeframe}
-💰 *Entry Price:* ${currentClose}
-📊 *RSI (14):* ${currentRsi.toFixed(2)}
-📈 *EMA 20:* ${currentEma20.toFixed(4)}
+💰 *Breakout Price:* ${currentClose}
+🎯 *VWAP Level:* ${currentVWAP.toFixed(4)}
 --------------------------
 💵 *Take Profit:* ${tp1.toPrecision(5)}
 🛑 *Stop Loss:* ${sl.toPrecision(5)}
@@ -155,7 +133,7 @@ async function run() {
         const coins = await getFilteredPairs();
         let totalSignals = 0;
         
-        await bot.sendMessage(chatId, `🔍 *15m Dual-Strategy Scanner Started*\nTarget: RSI Reversals & EMA Retests\nScanning Top ${coins.length} Coins...`);
+        await bot.sendMessage(chatId, `🔍 *Pro Breakout Scanner Started*\nStrategy: Bollinger Bands + VWAP + Volume\nScanning Top ${coins.length} Coins (1h & 4h)...`);
 
         for (const tf of timeframes) {
             for (const coin of coins) {
@@ -166,9 +144,9 @@ async function run() {
         }
         
         if (totalSignals === 0) {
-            await bot.sendMessage(chatId, `✅ Scan Finished. No Sniper or Retest setups found right now.`);
+            await bot.sendMessage(chatId, `✅ Scan Finished. No valid institutional breakouts found right now.`);
         } else {
-            await bot.sendMessage(chatId, `✅ Scan Finished. Found ${totalSignals} Perfect Signals.`);
+            await bot.sendMessage(chatId, `✅ Scan Finished. Found ${totalSignals} Sniper Breakouts!`);
         }
     } catch (error) { 
         console.error("Run Error:", error.message); 
