@@ -1,0 +1,10 @@
+{
+  "name": "ema-crossover-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "ccxt": "^4.0.0",
+    "technicalindicators": "^3.1.0",
+    "node-telegram-bot-api": "^0.61.0"
+  }
+}
