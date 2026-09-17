@@ -63,6 +63,25 @@ const RSI_OVERSOLD = 30;
 const RSI_OVERBOUGHT = 70;
 
 // ======================================================
+// RSI ENTRY FRESHNESS
+// ======================================================
+//
+// LONG:
+// RSI bottom can be anywhere from 30 down to 0.
+// Current RSI should still be <= 35.
+//
+// SHORT:
+// RSI top can be anywhere from 70 up to 100.
+// Current RSI should still be >= 65.
+//
+// This prevents very late entries.
+//
+
+const LONG_MAX_ENTRY_RSI = 35;
+
+const SHORT_MIN_ENTRY_RSI = 65;
+
+// ======================================================
 // MAJOR COINS
 // ======================================================
 
@@ -402,7 +421,7 @@ async function analyzeCoin(symbol, timeframe) {
         // --------------------------------------------------
 
         if (
-            rsiIndex < 6 ||
+            rsiIndex < 7 ||
             rsiPrevIndex < 0 ||
             adxIndex < 1 ||
             adxPrevIndex < 0 ||
@@ -437,6 +456,9 @@ async function analyzeCoin(symbol, timeframe) {
 
         const rsi6 =
             rsiArr[rsiIndex - 6];
+
+        const rsi7 =
+            rsiArr[rsiIndex - 7];
 
         const lastAdx =
             adxArr[adxIndex].adx;
@@ -483,6 +505,9 @@ async function analyzeCoin(symbol, timeframe) {
         // --------------------------------------------------
 
         const rsiHistory = [
+            rsi6,
+            rsi5,
+            rsi4,
             rsi3,
             rsi2,
             prevRsi,
@@ -496,37 +521,58 @@ async function analyzeCoin(symbol, timeframe) {
             Math.max(...rsiHistory);
 
         // ==================================================
-        // ⭐ RSI CONFIRMED BOTTOM / TOP
+        // ⭐ RSI EXTREME BOTTOM / TOP REVERSAL
         // ==================================================
         //
-        // LONG examples:
+        // LONG BOTTOM:
         //
-        // 31 → 27 → 25 → 26 → 28
-        //          ↓    ↑     ↑
-        //        BOTTOM  CONFIRMED
+        // RSI can go:
         //
-        // 31 → 27 → 25 → 26 → 27 → 29
-        //          ↓    ↑     ↑     ↑
-        //        BOTTOM       CONFIRMED
+        // 30 → 25 → 20 → 18 → 21 → 24
         //
-        // SHORT examples:
+        // OR:
         //
-        // 69 → 73 → 75 → 74 → 72
-        //          ↑    ↓     ↓
-        //         TOP   CONFIRMED
+        // 20 → 12 → 8 → 11 → 14
         //
-        // 69 → 73 → 75 → 74 → 73 → 71
-        //          ↑    ↓     ↓     ↓
-        //         TOP        CONFIRMED
+        // OR:
         //
-        // Bottom/top can be 2, 3 or 4 candles back.
-        // The confirmation requires at least TWO
-        // consecutive RSI moves in the reversal direction.
+        // 25 → 15 → 7 → 4 → 6 → 9 → 13
+        //
+        // Bottom can be 2–6 candles back.
+        //
+        // RSI <= 30 includes extreme values:
+        // 20, 15, 10, 5, 1, etc.
+        //
+        // Current RSI must still be <= 35.
+        //
+        //
+        // SHORT TOP:
+        //
+        // 70 → 75 → 80 → 78 → 75
+        //
+        // OR:
+        //
+        // 82 → 91 → 96 → 93 → 89
+        //
+        // OR:
+        //
+        // 75 → 88 → 96 → 99 → 95 → 91
+        //
+        // Top can be 2–6 candles back.
+        //
+        // RSI >= 70 includes:
+        // 80, 90, 95, 99, 100.
+        //
+        // Current RSI must still be >= 65.
         // ==================================================
 
         // --------------------------------------------------
         // LONG: Bottom 2 candles back
-        // Example: 25 → 26 → 28
+        // Example:
+        // 25 → 26 → 28
+        //
+        // Extreme:
+        // 8 → 11 → 14
         // --------------------------------------------------
 
         const longBottom2 =
@@ -534,11 +580,16 @@ async function analyzeCoin(symbol, timeframe) {
             rsi2 < rsi3 &&
             rsi2 < prevRsi &&
             prevRsi > rsi2 &&
-            lastRsi > prevRsi;
+            lastRsi > prevRsi &&
+            lastRsi <= LONG_MAX_ENTRY_RSI;
 
         // --------------------------------------------------
         // LONG: Bottom 3 candles back
-        // Example: 25 → 26 → 27 → 29
+        // Example:
+        // 25 → 26 → 27 → 29
+        //
+        // Extreme:
+        // 8 → 10 → 13 → 16
         // --------------------------------------------------
 
         const longBottom3 =
@@ -547,11 +598,16 @@ async function analyzeCoin(symbol, timeframe) {
             rsi3 < rsi2 &&
             rsi2 > rsi3 &&
             prevRsi > rsi2 &&
-            lastRsi > prevRsi;
+            lastRsi > prevRsi &&
+            lastRsi <= LONG_MAX_ENTRY_RSI;
 
         // --------------------------------------------------
         // LONG: Bottom 4 candles back
-        // Example: 25 → 26 → 27 → 28 → 30
+        // Example:
+        // 25 → 26 → 27 → 28 → 30
+        //
+        // Extreme:
+        // 12 → 8 → 11 → 14 → 17
         // --------------------------------------------------
 
         const longBottom4 =
@@ -561,11 +617,57 @@ async function analyzeCoin(symbol, timeframe) {
             rsi3 > rsi4 &&
             rsi2 > rsi3 &&
             prevRsi > rsi2 &&
-            lastRsi > prevRsi;
+            lastRsi > prevRsi &&
+            lastRsi <= LONG_MAX_ENTRY_RSI;
+
+        // --------------------------------------------------
+        // LONG: Bottom 5 candles back
+        //
+        // Example:
+        // 28 → 20 → 12 → 15 → 18 → 21 → 24
+        //
+        // Bottom = 12
+        // --------------------------------------------------
+
+        const longBottom5 =
+            rsi5 <= RSI_OVERSOLD &&
+            rsi5 < rsi6 &&
+            rsi5 < rsi4 &&
+            rsi4 > rsi5 &&
+            rsi3 > rsi4 &&
+            rsi2 > rsi3 &&
+            prevRsi > rsi2 &&
+            lastRsi > prevRsi &&
+            lastRsi <= LONG_MAX_ENTRY_RSI;
+
+        // --------------------------------------------------
+        // LONG: Bottom 6 candles back
+        //
+        // Example:
+        // 35 → 25 → 15 → 8 → 11 → 14 → 18 → 22
+        //
+        // Bottom = 8
+        // --------------------------------------------------
+
+        const longBottom6 =
+            rsi6 <= RSI_OVERSOLD &&
+            rsi6 < rsi7 &&
+            rsi6 < rsi5 &&
+            rsi5 > rsi6 &&
+            rsi4 > rsi5 &&
+            rsi3 > rsi4 &&
+            rsi2 > rsi3 &&
+            prevRsi > rsi2 &&
+            lastRsi > prevRsi &&
+            lastRsi <= LONG_MAX_ENTRY_RSI;
 
         // --------------------------------------------------
         // SHORT: Top 2 candles back
-        // Example: 75 → 74 → 72
+        // Example:
+        // 75 → 74 → 72
+        //
+        // Extreme:
+        // 96 → 93 → 89
         // --------------------------------------------------
 
         const shortTop2 =
@@ -573,11 +675,16 @@ async function analyzeCoin(symbol, timeframe) {
             rsi2 > rsi3 &&
             rsi2 > prevRsi &&
             prevRsi < rsi2 &&
-            lastRsi < prevRsi;
+            lastRsi < prevRsi &&
+            lastRsi >= SHORT_MIN_ENTRY_RSI;
 
         // --------------------------------------------------
         // SHORT: Top 3 candles back
-        // Example: 75 → 74 → 73 → 71
+        // Example:
+        // 75 → 74 → 73 → 71
+        //
+        // Extreme:
+        // 96 → 94 → 91 → 88
         // --------------------------------------------------
 
         const shortTop3 =
@@ -586,11 +693,16 @@ async function analyzeCoin(symbol, timeframe) {
             rsi3 > rsi2 &&
             rsi2 < rsi3 &&
             prevRsi < rsi2 &&
-            lastRsi < prevRsi;
+            lastRsi < prevRsi &&
+            lastRsi >= SHORT_MIN_ENTRY_RSI;
 
         // --------------------------------------------------
         // SHORT: Top 4 candles back
-        // Example: 75 → 74 → 73 → 72 → 70
+        // Example:
+        // 75 → 74 → 73 → 72 → 70
+        //
+        // Extreme:
+        // 92 → 96 → 94 → 91 → 87
         // --------------------------------------------------
 
         const shortTop4 =
@@ -600,7 +712,49 @@ async function analyzeCoin(symbol, timeframe) {
             rsi3 < rsi4 &&
             rsi2 < rsi3 &&
             prevRsi < rsi2 &&
-            lastRsi < prevRsi;
+            lastRsi < prevRsi &&
+            lastRsi >= SHORT_MIN_ENTRY_RSI;
+
+        // --------------------------------------------------
+        // SHORT: Top 5 candles back
+        //
+        // Example:
+        // 65 → 80 → 92 → 88 → 84 → 79 → 74
+        //
+        // Top = 92
+        // --------------------------------------------------
+
+        const shortTop5 =
+            rsi5 >= RSI_OVERBOUGHT &&
+            rsi5 > rsi6 &&
+            rsi5 > rsi4 &&
+            rsi4 < rsi5 &&
+            rsi3 < rsi4 &&
+            rsi2 < rsi3 &&
+            prevRsi < rsi2 &&
+            lastRsi < prevRsi &&
+            lastRsi >= SHORT_MIN_ENTRY_RSI;
+
+        // --------------------------------------------------
+        // SHORT: Top 6 candles back
+        //
+        // Example:
+        // 60 → 75 → 88 → 96 → 93 → 90 → 85 → 80
+        //
+        // Top = 96
+        // --------------------------------------------------
+
+        const shortTop6 =
+            rsi6 >= RSI_OVERBOUGHT &&
+            rsi6 > rsi7 &&
+            rsi6 > rsi5 &&
+            rsi5 < rsi6 &&
+            rsi4 < rsi5 &&
+            rsi3 < rsi4 &&
+            rsi2 < rsi3 &&
+            prevRsi < rsi2 &&
+            lastRsi < prevRsi &&
+            lastRsi >= SHORT_MIN_ENTRY_RSI;
 
         // --------------------------------------------------
         // FINAL CONFIRMED RSI SIGNAL
@@ -609,12 +763,16 @@ async function analyzeCoin(symbol, timeframe) {
         const isRsiBottomHook =
             longBottom2 ||
             longBottom3 ||
-            longBottom4;
+            longBottom4 ||
+            longBottom5 ||
+            longBottom6;
 
         const isRsiTopHook =
             shortTop2 ||
             shortTop3 ||
-            shortTop4;
+            shortTop4 ||
+            shortTop5 ||
+            shortTop6;
 
         // --------------------------------------------------
         // RSI DIVERGENCE
@@ -1349,7 +1507,7 @@ ${setupMsg.map(x => '✅ ' + x).join('\n')}
 ━━━━━━━━━━━━━━━━━━━━
 📊 *TECHNICALS*
 
-*RSI:* ${rsi6.toFixed(1)} → ${rsi5.toFixed(1)} → ${rsi4.toFixed(1)} → ${rsi3.toFixed(1)} → ${rsi2.toFixed(1)} → ${prevRsi.toFixed(1)} → ${lastRsi.toFixed(1)}
+*RSI:* ${rsi7.toFixed(1)} → ${rsi6.toFixed(1)} → ${rsi5.toFixed(1)} → ${rsi4.toFixed(1)} → ${rsi3.toFixed(1)} → ${rsi2.toFixed(1)} → ${prevRsi.toFixed(1)} → ${lastRsi.toFixed(1)}
 
 *RSI Current:* ${lastRsi.toFixed(1)}
 
