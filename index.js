@@ -23,14 +23,19 @@ async function getFilteredPairs() {
             const ticker = tickers[symbol];
             const base = symbol.split(':')[0];
             const isMajor = majorCoins.includes(base);
-            const isCheap = ticker.last < 10 && symbol.endsWith('USDT');
+            
+            // CHANGED: Price is now < 15 USDT
+            const isCheap = ticker.last < 15 && symbol.endsWith('USDT');
 
-            if ((isMajor || isCheap) && ticker.quoteVolume > 1000000) {
+            // Reduced volume requirement slightly to 500k to ensure we hit 500+ coins
+            if ((isMajor || isCheap) && ticker.quoteVolume > 500000) {
                 filteredSymbols.push(symbol);
             }
         }
         filteredSymbols.sort((a, b) => tickers[b].quoteVolume - tickers[a].quoteVolume);
-        return filteredSymbols.slice(0, 150); // Top 150
+        
+        // CHANGED: Scanning up to 600 coins to cover your 500+ requirement
+        return filteredSymbols.slice(0, 600); 
     } catch (e) { return []; }
 }
 
@@ -45,8 +50,8 @@ async function analyzeCoin(symbol, timeframe) {
         const closePrices = candles.map(c => c[4]);
         const volumes = candles.map(c => c[5]);
 
-        const lastIndex = closePrices.length - 2; // Last completely closed candle
-        const prevIndex = closePrices.length - 3; // Previous closed candle
+        const lastIndex = closePrices.length - 2; 
+        const prevIndex = closePrices.length - 3; 
 
         // 1. INDICATORS
         const rsiArr = RSI.calculate({ period: 14, values: closePrices });
@@ -119,19 +124,16 @@ async function analyzeCoin(symbol, timeframe) {
         if (isRsiBottomHook) {
             side = "LONG Opportunity"; emoji = "🟢";
             setupMsg.push("🔥 RSI Hook UP (Exact Bottom Caught)");
-            // Adding SMC confirmations IF they happened at the same time
             if (isBullishSweep) setupMsg.push("🧹 Liquidity Sweep (Stop Hunt)");
             if (isBullishChoch) setupMsg.push("📈 BOS/CHoCH (Broke Resistance)");
         } 
         else if (isRsiTopHook) {
             side = "SHORT Opportunity"; emoji = "🔴";
             setupMsg.push("🔥 RSI Hook DOWN (Exact Top Caught)");
-            // Adding SMC confirmations IF they happened at the same time
             if (isBearishSweep) setupMsg.push("🧹 Liquidity Sweep (Bull Trap)");
             if (isBearishChoch) setupMsg.push("📉 BOS/CHoCH (Broke Support)");
         }
 
-        // If the strict RSI rule is met, send message
         if (side) {
             let fundingStr = "N/A", oiStr = "N/A", liqData = "Normal";
             try {
@@ -198,7 +200,7 @@ async function run() {
         const coins = await getFilteredPairs();
         let totalSignals = 0;
 
-        await bot.sendMessage(chatId, `🔍 *Strict RSI Reversal & SMC Bot*\nTracking Top & Bottom Hooks ONLY...\nScanning Top ${coins.length} Coins...`);
+        await bot.sendMessage(chatId, `🔍 *Strict RSI Reversal & SMC Bot*\nPrice < $15 | Scanning ${coins.length} Coins...`);
 
         for (const tf of timeframes) {
             for (const coin of coins) {
