@@ -12,6 +12,7 @@ const exchange = new ccxt.bitget({
     'enableRateLimit': true
 });
 
+// Removed 1h as per your request. Only 4h, 1d, 1w are active.
 const timeframes = ['4h', '1d', '1w'];
 const majorCoins = ['BTC/USDT', 'BNB/USDT', 'SOL/USDT', 'ETH/USDT'];
 
@@ -23,18 +24,13 @@ async function getFilteredPairs() {
             const ticker = tickers[symbol];
             const base = symbol.split(':')[0];
             const isMajor = majorCoins.includes(base);
-            
-            // CHANGED: Price is now < 15 USDT
             const isCheap = ticker.last < 15 && symbol.endsWith('USDT');
 
-            // Reduced volume requirement slightly to 500k to ensure we hit 500+ coins
             if ((isMajor || isCheap) && ticker.quoteVolume > 500000) {
                 filteredSymbols.push(symbol);
             }
         }
         filteredSymbols.sort((a, b) => tickers[b].quoteVolume - tickers[a].quoteVolume);
-        
-        // CHANGED: Scanning up to 600 coins to cover your 500+ requirement
         return filteredSymbols.slice(0, 600); 
     } catch (e) { return []; }
 }
@@ -50,10 +46,8 @@ async function analyzeCoin(symbol, timeframe) {
         const closePrices = candles.map(c => c[4]);
         const volumes = candles.map(c => c[5]);
 
-        const lastIndex = closePrices.length - 2; 
-        const prevIndex = closePrices.length - 3; 
-
-        // 1. INDICATORS
+        const lastIndex = closePrices.length - 2; // Last completely closed candle
+        
         const rsiArr = RSI.calculate({ period: 14, values: closePrices });
         const adxArr = ADX.calculate({ high: highPrices, low: lowPrices, close: closePrices, period: 14 });
         const atrArr = ATR.calculate({ high: highPrices, low: lowPrices, close: closePrices, period: 14 });
@@ -62,15 +56,23 @@ async function analyzeCoin(symbol, timeframe) {
 
         if (!rsiArr[lastIndex] || !adxArr[lastIndex] || !ema20Arr[lastIndex]) return false;
 
+        // Current Closed Data
         const lastRsi = rsiArr[lastIndex];
-        const prevRsi = rsiArr[prevIndex];
         const lastAdx = adxArr[lastIndex].adx;
-        const prevAdx = adxArr[prevIndex].adx;
         const lastAtr = atrArr[lastIndex];
         const lastEma20 = ema20Arr[lastIndex];
         const volMa = volMaArr[lastIndex];
 
-        // 2. VWAP Calculation
+        // Previous Data
+        const prevRsi = rsiArr[lastIndex - 1];
+        const prevAdx = adxArr[lastIndex - 1].adx;
+        
+        // Smart Hook Logic: Check the lowest/highest RSI in the last 3 closed candles
+        const rsiHistory3 = [rsiArr[lastIndex - 1], rsiArr[lastIndex - 2], rsiArr[lastIndex - 3]];
+        const lowestRsiRecent = Math.min(...rsiHistory3);
+        const highestRsiRecent = Math.max(...rsiHistory3);
+
+        // VWAP
         let sumTPV = 0, sumVol = 0;
         for(let i = lastIndex - 20; i <= lastIndex; i++) {
              let typicalPrice = (highPrices[i] + lowPrices[i] + closePrices[i]) / 3;
@@ -85,10 +87,10 @@ async function analyzeCoin(symbol, timeframe) {
         const lastLow = lowPrices[lastIndex];
         const currentVol = volumes[lastIndex];
 
-        const prevClose = closePrices[prevIndex];
-        const prevOpen = openPrices[prevIndex];
+        const prevClose = closePrices[lastIndex - 1];
+        const prevOpen = openPrices[lastIndex - 1];
 
-        // 3. SMC LOGIC: Support/Resistance, Sweep & BOS/CHoCH
+        // SMC LOGIC
         const recentLows = lowPrices.slice(-12, -2);
         const recentHighs = highPrices.slice(-12, -2);
         const support = Math.min(...recentLows);
@@ -102,7 +104,7 @@ async function analyzeCoin(symbol, timeframe) {
         const volSpike = currentVol > (volMa * 1.8); 
         const isExhausted = prevAdx > 25 && lastAdx < prevAdx;
 
-        // 4. Candlestick Patterns
+        // Candlestick Patterns
         const body = Math.abs(lastClose - lastOpen);
         const lowerWick = Math.min(lastOpen, lastClose) - lastLow;
         const upperWick = lastHigh - Math.max(lastOpen, lastClose);
@@ -116,20 +118,22 @@ async function analyzeCoin(symbol, timeframe) {
         let side = "", emoji = "", setupMsg = [];
 
         // ==========================================
-        // STRICT TRIGGER: ONLY RSI TOP & BOTTOM HOOKS
+        // SMART RSI HOOK LOGIC (No Signals Missed)
         // ==========================================
-        const isRsiBottomHook = (prevRsi <= 30 && lastRsi > prevRsi);
-        const isRsiTopHook = (prevRsi >= 70 && lastRsi < prevRsi);
+        // LONG: Touched <= 30 recently, and is currently pointing UP
+        const isRsiBottomHook = (lowestRsiRecent <= 30 && lastRsi > prevRsi);
+        // SHORT: Touched >= 70 recently, and is currently pointing DOWN
+        const isRsiTopHook = (highestRsiRecent >= 70 && lastRsi < prevRsi);
 
         if (isRsiBottomHook) {
             side = "LONG Opportunity"; emoji = "🟢";
-            setupMsg.push("🔥 RSI Hook UP (Exact Bottom Caught)");
+            setupMsg.push(`🔥 RSI Hook UP (${lowestRsiRecent.toFixed(1)} ➡️ ${lastRsi.toFixed(1)})`);
             if (isBullishSweep) setupMsg.push("🧹 Liquidity Sweep (Stop Hunt)");
             if (isBullishChoch) setupMsg.push("📈 BOS/CHoCH (Broke Resistance)");
         } 
         else if (isRsiTopHook) {
             side = "SHORT Opportunity"; emoji = "🔴";
-            setupMsg.push("🔥 RSI Hook DOWN (Exact Top Caught)");
+            setupMsg.push(`🔥 RSI Hook DOWN (${highestRsiRecent.toFixed(1)} ➡️ ${lastRsi.toFixed(1)})`);
             if (isBearishSweep) setupMsg.push("🧹 Liquidity Sweep (Bull Trap)");
             if (isBearishChoch) setupMsg.push("📉 BOS/CHoCH (Broke Support)");
         }
@@ -171,7 +175,7 @@ ${setupMsg.map(s => "✅ " + s).join("\n")}
 💰 *Price:* ${lastClose}
 --------------------------
 📊 *TECHNICALS:*
-*RSI:* ${prevRsi.toFixed(1)} ➡️ ${lastRsi.toFixed(1)} (${lastRsi > prevRsi ? "⬆️ Rising" : "⬇️ Falling"})
+*RSI Trend:* ${lastRsi > prevRsi ? "⬆️ Rising" : "⬇️ Falling"} (Current: ${lastRsi.toFixed(1)})
 *EMA 20:* ${lastEma20.toFixed(4)}
 *VWAP:* ${lastVwap.toFixed(4)}
 *ADX Trend:* ${adxStatus}
@@ -200,7 +204,7 @@ async function run() {
         const coins = await getFilteredPairs();
         let totalSignals = 0;
 
-        await bot.sendMessage(chatId, `🔍 *Strict RSI Reversal & SMC Bot*\nPrice < $15 | Scanning ${coins.length} Coins...`);
+        await bot.sendMessage(chatId, `🔍 *Smart RSI Reversal Bot Started*\nPrice < $15 | Scanning ${coins.length} Coins...\nTimeframes: 4h, 1d, 1w`);
 
         for (const tf of timeframes) {
             for (const coin of coins) {
