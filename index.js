@@ -1,6 +1,6 @@
 import ccxt from 'ccxt';
 import pkg from 'technicalindicators';
-const { EMA, RSI, ADX, ATR, SMA } = pkg;
+const { RSI, ATR } = pkg;
 import TelegramBot from 'node-telegram-bot-api';
 
 const token = process.env.TELEGRAM_TOKEN;
@@ -13,6 +13,7 @@ const exchange = new ccxt.bitget({
 });
 
 const timeframes = ['1h', '4h', '1d'];
+const majorCoins = ['BTC/USDT', 'BNB/USDT', 'SOL/USDT', 'ETH/USDT'];
 
 async function getFilteredPairs() {
     try {
@@ -20,12 +21,16 @@ async function getFilteredPairs() {
         let filteredSymbols = [];
         for (const symbol in tickers) {
             const ticker = tickers[symbol];
-            if (symbol.endsWith('USDT') && ticker.quoteVolume > 1000000) {
+            const base = symbol.split(':')[0];
+            const isMajor = majorCoins.includes(base);
+            const isCheap = ticker.last < 10 && symbol.endsWith('USDT');
+
+            if ((isMajor || isCheap) && ticker.quoteVolume > 1000000) {
                 filteredSymbols.push(symbol);
             }
         }
         filteredSymbols.sort((a, b) => tickers[b].quoteVolume - tickers[a].quoteVolume);
-        return filteredSymbols.slice(0, 150); // Top 150 High Volume Coins
+        return filteredSymbols.slice(0, 150); 
     } catch (e) { return []; }
 }
 
@@ -34,124 +39,105 @@ async function analyzeCoin(symbol, timeframe) {
         const candles = await exchange.fetchOHLCV(symbol, timeframe, undefined, 100);
         if (candles.length < 50) return false;
 
+        // Use length - 2 for the Last CLOSED candle, length - 3 for PREVIOUS closed candle
+        const lastClosedIndex = candles.length - 2;
+        const prevClosedIndex = candles.length - 3;
+
+        const openPrices = candles.map(c => c[1]);
         const highPrices = candles.map(c => c[2]);
         const lowPrices = candles.map(c => c[3]);
         const closePrices = candles.map(c => c[4]);
         const volumes = candles.map(c => c[5]);
 
-        // 1. STANDARD INDICATORS
-        const ema20Arr = EMA.calculate({ period: 20, values: closePrices });
         const rsiArr = RSI.calculate({ period: 14, values: closePrices });
-        const adxArr = ADX.calculate({ high: highPrices, low: lowPrices, close: closePrices, period: 14 });
         const atrArr = ATR.calculate({ high: highPrices, low: lowPrices, close: closePrices, period: 14 });
-        const volMaArr = SMA.calculate({ period: 20, values: volumes });
 
-        const currentEma20 = ema20Arr[ema20Arr.length - 1];
-        const currentRsi = rsiArr[rsiArr.length - 1];
-        const currentAdx = adxArr[adxArr.length - 1].adx;
-        const currentAtr = atrArr[atrArr.length - 1];
-        const currentVolMa = volMaArr[volMaArr.length - 1];
+        const lastRsi = rsiArr[lastClosedIndex];
+        const prevRsi = rsiArr[prevClosedIndex];
+        const lastAtr = atrArr[lastClosedIndex];
 
-        // Custom VWAP Calculation (Rolling 20 periods)
-        let sumTPV = 0, sumVol = 0;
-        for(let i = closePrices.length - 20; i < closePrices.length; i++) {
-             let typicalPrice = (highPrices[i] + lowPrices[i] + closePrices[i]) / 3;
-             sumTPV += typicalPrice * volumes[i];
-             sumVol += volumes[i];
+        const lastClose = closePrices[lastClosedIndex];
+        const lastOpen = openPrices[lastClosedIndex];
+        const lastHigh = highPrices[lastClosedIndex];
+        const lastLow = lowPrices[lastClosedIndex];
+
+        const prevClose = closePrices[prevClosedIndex];
+        const prevOpen = openPrices[prevClosedIndex];
+
+        if (!lastRsi || !prevRsi) return false;
+
+        // Candlestick Pattern Logic (On the last closed candle)
+        const body = Math.abs(lastClose - lastOpen);
+        const lowerWick = Math.min(lastOpen, lastClose) - lastLow;
+        const upperWick = lastHigh - Math.max(lastOpen, lastClose);
+
+        const isBullishHammer = (lowerWick > body * 1.5) && (upperWick < body * 0.5);
+        const isBullishEngulfing = (prevClose < prevOpen) && (lastClose > lastOpen) && (lastClose > prevOpen);
+        const isBullishCandle = isBullishHammer || isBullishEngulfing || (lastClose > lastOpen);
+
+        const isBearishShootingStar = (upperWick > body * 1.5) && (lowerWick < body * 0.5);
+        const isBearishEngulfing = (prevClose > prevOpen) && (lastClose < lastOpen) && (lastClose < prevOpen);
+        const isBearishCandle = isBearishShootingStar || isBearishEngulfing || (lastClose < lastOpen);
+
+        let side = "", emoji = "", setupMsg = "";
+
+        // ==========================================
+        // 1. EXACT BOTTOM REVERSAL (LONG)
+        // Condition: Prev RSI was <= 30 (Deep Bottom). Current RSI has hooked UP. Bullish Candle formed.
+        // ==========================================
+        if (prevRsi <= 30 && lastRsi > prevRsi && isBullishCandle) {
+            side = "LONG Opportunity";
+            emoji = "🟢";
+            setupMsg = "🔥 BOTTOM CAUGHT (RSI Hooked UP from Oversold)";
         }
-        const currentVwap = sumTPV / sumVol;
-
-        // Current & Previous Candle Data
-        const currentClose = closePrices[closePrices.length - 1];
-        const currentHigh = highPrices[highPrices.length - 1];
-        const currentLow = lowPrices[lowPrices.length - 1];
-        const currentVol = volumes[volumes.length - 1];
-
-        // 2. SMC PRICE ACTION LOGIC (Support/Resistance & Liquidity Sweep)
-        // Find recent Swing Low (Support) and Swing High (Resistance) from previous 5 to 10 candles
-        const recentLows = lowPrices.slice(-10, -2);
-        const recentHighs = highPrices.slice(-10, -2);
-        const swingLowSupport = Math.min(...recentLows);
-        const swingHighResistance = Math.max(...recentHighs);
-
-        // Bullish Liquidity Sweep: Wicks below support but closes back inside/above
-        const isBullishLiqSweep = currentLow < swingLowSupport && currentClose > swingLowSupport;
-        // Bearish Liquidity Sweep: Wicks above resistance but closes back inside/below
-        const isBearishLiqSweep = currentHigh > swingHighResistance && currentClose < swingHighResistance;
-
-        // CHoCH / BOS Logic
-        const isBullishChoch = currentClose > swingHighResistance;
-        const isBearishChoch = currentClose < swingLowSupport;
-
-        // Volume Anomaly (Liquidation footprint)
-        const isVolSpike = currentVol > (currentVolMa * 1.8);
-
-        let side = "", emoji = "", setupDetails = [];
-
-        // --- LONG ENTRY SETUP ---
-        if (isBullishLiqSweep || (isBullishChoch && currentClose > currentVwap)) {
-            if (isVolSpike) { // Smart money is entering
-                side = "LONG (SMC Setup)"; emoji = "🟢";
-                if (isBullishLiqSweep) setupDetails.push("🧹 Bullish Liquidity Sweep (Stop Hunt)");
-                if (isBullishChoch) setupDetails.push("📈 CHoCH (Trend Reversal)");
-                if (currentClose > currentVwap) setupDetails.push("⚖️ Price Above VWAP");
-                if (currentEma20 > currentVwap) setupDetails.push("✅ EMA 20 Confirming");
-            }
-        }
-        // --- SHORT ENTRY SETUP ---
-        else if (isBearishLiqSweep || (isBearishChoch && currentClose < currentVwap)) {
-            if (isVolSpike) { // Smart money is entering
-                side = "SHORT (SMC Setup)"; emoji = "🔴";
-                if (isBearishLiqSweep) setupDetails.push("🧹 Bearish Liquidity Sweep (Bull Trap)");
-                if (isBearishChoch) setupDetails.push("📉 CHoCH (Trend Reversal)");
-                if (currentClose < currentVwap) setupDetails.push("⚖️ Price Below VWAP");
-                if (currentEma20 < currentVwap) setupDetails.push("✅ EMA 20 Confirming");
-            }
+        
+        // ==========================================
+        // 2. EXACT TOP REVERSAL (SHORT)
+        // Condition: Prev RSI was >= 70 (Absolute Top). Current RSI has hooked DOWN. Bearish Candle formed.
+        // ==========================================
+        else if (prevRsi >= 70 && lastRsi < prevRsi && isBearishCandle) {
+            side = "SHORT Opportunity";
+            emoji = "🔴";
+            setupMsg = "🔥 TOP CAUGHT (RSI Hooked DOWN from Overbought)";
         }
 
-        if (side && setupDetails.length > 0) {
-            
-            // 3. FETCH DERIVATIVES DATA (Funding & Open Interest)
-            let fundingRate = "N/A", openInterest = "N/A", liqAlert = "";
+        if (side) {
+            let fundingRate = "N/A";
             try {
                 const funding = await exchange.fetchFundingRate(symbol);
                 if (funding && funding.fundingRate) {
-                    const fr = funding.fundingRate * 100;
-                    fundingRate = `${fr.toFixed(4)}%`;
-                    if (side.includes("LONG") && fr < -0.01) liqAlert = "🔥 High Short-Squeeze Probability";
-                    if (side.includes("SHORT") && fr > 0.01) liqAlert = "🔥 Long-Liquidation Cascade Possible";
+                    fundingRate = `${(funding.fundingRate * 100).toFixed(4)}%`;
                 }
-                const oiData = await exchange.fetchOpenInterest(symbol);
-                if (oiData && oiData.openInterestValue) {
-                    openInterest = `$${(oiData.openInterestValue / 1000000).toFixed(2)}M`;
-                }
-            } catch (e) { /* ignore fetching errors */ }
+            } catch (e) {}
 
             const baseAsset = symbol.split('/')[0]; 
             const binanceChartUrl = `https://www.tradingview.com/chart/?symbol=BINANCE:${baseAsset}USDT.P`;
             
-            // Auto TP/SL Calculation based on ATR
-            let sl = side.includes("LONG") ? currentLow - (currentAtr * 1.0) : currentHigh + (currentAtr * 1.0);
-            let tp = side.includes("LONG") ? currentClose + (currentAtr * 2.5) : currentClose - (currentAtr * 2.5);
+            // Auto TP/SL
+            let sl = side.includes("LONG") ? lastLow - (lastAtr * 0.5) : lastHigh + (lastAtr * 0.5);
+            let tp1 = side.includes("LONG") ? lastClose + (lastAtr * 2.0) : lastClose - (lastAtr * 2.0);
+            let tp2 = side.includes("LONG") ? lastClose + (lastAtr * 3.5) : lastClose - (lastAtr * 3.5);
+
+            let candleType = "Reversal Confirmed";
+            if (isBullishHammer) candleType = "🔨 Bullish Hammer";
+            if (isBullishEngulfing) candleType = "🐂 Bullish Engulfing";
+            if (isBearishShootingStar) candleType = "🌠 Shooting Star";
+            if (isBearishEngulfing) candleType = "🐻 Bearish Engulfing";
 
             const message = `
 ${emoji} *${side}*
 --------------------------
-🧩 *Smart Money Concepts:*
-${setupDetails.map(s => s).join("\n")}
+🎯 *Setup:* ${setupMsg}
+🕯️ *Pattern:* ${candleType}
 --------------------------
 🪙 *Coin:* #${baseAsset}
 ⏰ *Timeframe:* ${timeframe}
-💰 *Price:* ${currentClose}
-📊 *RSI:* ${currentRsi.toFixed(2)} | *ADX:* ${currentAdx.toFixed(2)}
-⚖️ *VWAP:* ${currentVwap.toFixed(4)} | *EMA 20:* ${currentEma20.toFixed(4)}
+💰 *Entry Price:* ${lastClose}
+📊 *RSI Hook:* ${prevRsi.toFixed(1)} ➡️ ${lastRsi.toFixed(1)}
+🏦 *Funding:* ${fundingRate}
 --------------------------
-🏦 *Derivatives Data:*
-*Funding Rate:* ${fundingRate}
-*Open Interest:* ${openInterest}
-*Liquidation Risk:* ${liqAlert || "Normal"}
---------------------------
-💵 *Take Profit:* ${tp.toPrecision(5)}
+💵 *Take Profit 1:* ${tp1.toPrecision(5)}
+💵 *Take Profit 2:* ${tp2.toPrecision(5)}
 🛑 *Stop Loss:* ${sl.toPrecision(5)}
 --------------------------
 🔗 [Open Binance Chart](${binanceChartUrl})`;
@@ -168,7 +154,7 @@ async function run() {
         const coins = await getFilteredPairs();
         let totalSignals = 0;
         
-        await bot.sendMessage(chatId, `🧠 *God-Tier SMC Bot Started*\nTracking Liquidity Sweeps, CHoCH, VWAP, Funding & OI...\nScanning Top ${coins.length} Coins...`);
+        await bot.sendMessage(chatId, `🔍 *Top & Bottom Catcher Started*\nStrategy: Exact RSI Reversal Hooks\nScanning Top ${coins.length} Coins...`);
 
         for (const tf of timeframes) {
             for (const coin of coins) {
@@ -179,8 +165,8 @@ async function run() {
         }
         
         const statusMsg = totalSignals === 0 
-            ? "✅ Scan Finished: No Smart Money manipulation detected right now." 
-            : `✅ Scan Finished: Found ${totalSignals} Institutional Setups.`;
+            ? "✅ Scan Finished: No exact Top or Bottom reversals right now." 
+            : `✅ Scan Finished: Caught ${totalSignals} Exact Reversals.`;
         await bot.sendMessage(chatId, statusMsg);
     } catch (error) { 
         console.error("Run Error:", error.message); 
