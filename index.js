@@ -1,6 +1,6 @@
 import ccxt from 'ccxt';
 import pkg from 'technicalindicators';
-const { BollingerBands, ATR } = pkg;
+const { EMA, RSI, ADX, ATR, SMA } = pkg;
 import TelegramBot from 'node-telegram-bot-api';
 
 const token = process.env.TELEGRAM_TOKEN;
@@ -12,27 +12,20 @@ const exchange = new ccxt.bitget({
     'enableRateLimit': true
 });
 
-// Removed 15m. Using highly reliable Swing Timeframes: 1h & 4h
-const timeframes = ['1h', '4h'];
-const majorCoins = ['BTC/USDT', 'BNB/USDT', 'SOL/USDT', 'ETH/USDT'];
+const timeframes = ['1h', '4h', '1d'];
 
 async function getFilteredPairs() {
     try {
         const tickers = await exchange.fetchTickers();
         let filteredSymbols = [];
-        
         for (const symbol in tickers) {
             const ticker = tickers[symbol];
-            const base = symbol.split(':')[0];
-            const isMajor = majorCoins.includes(base);
-            const isCheap = ticker.last < 10 && symbol.endsWith('USDT');
-
-            if ((isMajor || isCheap) && ticker.quoteVolume > 500000) {
+            if (symbol.endsWith('USDT') && ticker.quoteVolume > 1000000) {
                 filteredSymbols.push(symbol);
             }
         }
         filteredSymbols.sort((a, b) => tickers[b].quoteVolume - tickers[a].quoteVolume);
-        return filteredSymbols.slice(0, 200); 
+        return filteredSymbols.slice(0, 150); // Top 150 High Volume Coins
     } catch (e) { return []; }
 }
 
@@ -46,77 +39,119 @@ async function analyzeCoin(symbol, timeframe) {
         const closePrices = candles.map(c => c[4]);
         const volumes = candles.map(c => c[5]);
 
-        // Bollinger Bands Calculation (20 period, 2 Standard Deviations)
-        const bbArr = BollingerBands.calculate({ period: 20, stdDev: 2, values: closePrices });
+        // 1. STANDARD INDICATORS
+        const ema20Arr = EMA.calculate({ period: 20, values: closePrices });
+        const rsiArr = RSI.calculate({ period: 14, values: closePrices });
+        const adxArr = ADX.calculate({ high: highPrices, low: lowPrices, close: closePrices, period: 14 });
         const atrArr = ATR.calculate({ high: highPrices, low: lowPrices, close: closePrices, period: 14 });
+        const volMaArr = SMA.calculate({ period: 20, values: volumes });
 
-        // T-1: Current Closed Candle
-        const currentClose = closePrices[closePrices.length - 2];
-        const currentVol = volumes[volumes.length - 2];
-        const currentBB = bbArr[bbArr.length - 2];
+        const currentEma20 = ema20Arr[ema20Arr.length - 1];
+        const currentRsi = rsiArr[rsiArr.length - 1];
+        const currentAdx = adxArr[adxArr.length - 1].adx;
         const currentAtr = atrArr[atrArr.length - 1];
+        const currentVolMa = volMaArr[volMaArr.length - 1];
 
-        // Average Volume of the last 20 candles
-        const avgVol = volumes.slice(-22, -2).reduce((a, b) => a + b, 0) / 20;
-
-        // Custom Rolling VWAP Calculation (Last 20 Periods)
-        let sumTPV = 0;
-        let sumVol = 0;
-        for(let i = closePrices.length - 22; i < closePrices.length - 2; i++) {
+        // Custom VWAP Calculation (Rolling 20 periods)
+        let sumTPV = 0, sumVol = 0;
+        for(let i = closePrices.length - 20; i < closePrices.length; i++) {
              let typicalPrice = (highPrices[i] + lowPrices[i] + closePrices[i]) / 3;
              sumTPV += typicalPrice * volumes[i];
              sumVol += volumes[i];
         }
-        const currentVWAP = sumTPV / sumVol;
+        const currentVwap = sumTPV / sumVol;
 
-        if (!currentBB || !currentVWAP) return false;
+        // Current & Previous Candle Data
+        const currentClose = closePrices[closePrices.length - 1];
+        const currentHigh = highPrices[highPrices.length - 1];
+        const currentLow = lowPrices[lowPrices.length - 1];
+        const currentVol = volumes[volumes.length - 1];
 
-        let side = "";
-        let emoji = "";
-        let breakoutType = "";
+        // 2. SMC PRICE ACTION LOGIC (Support/Resistance & Liquidity Sweep)
+        // Find recent Swing Low (Support) and Swing High (Resistance) from previous 5 to 10 candles
+        const recentLows = lowPrices.slice(-10, -2);
+        const recentHighs = highPrices.slice(-10, -2);
+        const swingLowSupport = Math.min(...recentLows);
+        const swingHighResistance = Math.max(...recentHighs);
 
-        // STRATEGY LOGIC: Bollinger Band Breakout + VWAP Confirmation + Volume Spike
+        // Bullish Liquidity Sweep: Wicks below support but closes back inside/above
+        const isBullishLiqSweep = currentLow < swingLowSupport && currentClose > swingLowSupport;
+        // Bearish Liquidity Sweep: Wicks above resistance but closes back inside/below
+        const isBearishLiqSweep = currentHigh > swingHighResistance && currentClose < swingHighResistance;
 
-        // 1. BULLISH BREAKOUT (LONG)
-        // Condition: Closed above Upper BB + High Volume + Above VWAP
-        if (currentClose > currentBB.upper && currentVol > (avgVol * 1.8) && currentClose > currentVWAP) {
-            side = "LONG Opportunity";
-            emoji = "🟢";
-            breakoutType = "🚀 BULLISH VOLATILITY BREAKOUT";
+        // CHoCH / BOS Logic
+        const isBullishChoch = currentClose > swingHighResistance;
+        const isBearishChoch = currentClose < swingLowSupport;
+
+        // Volume Anomaly (Liquidation footprint)
+        const isVolSpike = currentVol > (currentVolMa * 1.8);
+
+        let side = "", emoji = "", setupDetails = [];
+
+        // --- LONG ENTRY SETUP ---
+        if (isBullishLiqSweep || (isBullishChoch && currentClose > currentVwap)) {
+            if (isVolSpike) { // Smart money is entering
+                side = "LONG (SMC Setup)"; emoji = "🟢";
+                if (isBullishLiqSweep) setupDetails.push("🧹 Bullish Liquidity Sweep (Stop Hunt)");
+                if (isBullishChoch) setupDetails.push("📈 CHoCH (Trend Reversal)");
+                if (currentClose > currentVwap) setupDetails.push("⚖️ Price Above VWAP");
+                if (currentEma20 > currentVwap) setupDetails.push("✅ EMA 20 Confirming");
+            }
         }
-        // 2. BEARISH BREAKOUT (SHORT)
-        // Condition: Closed below Lower BB + High Volume + Below VWAP
-        else if (currentClose < currentBB.lower && currentVol > (avgVol * 1.8) && currentClose < currentVWAP) {
-            side = "SHORT Opportunity";
-            emoji = "🔴";
-            breakoutType = "🩸 BEARISH VOLATILITY BREAKOUT";
+        // --- SHORT ENTRY SETUP ---
+        else if (isBearishLiqSweep || (isBearishChoch && currentClose < currentVwap)) {
+            if (isVolSpike) { // Smart money is entering
+                side = "SHORT (SMC Setup)"; emoji = "🔴";
+                if (isBearishLiqSweep) setupDetails.push("🧹 Bearish Liquidity Sweep (Bull Trap)");
+                if (isBearishChoch) setupDetails.push("📉 CHoCH (Trend Reversal)");
+                if (currentClose < currentVwap) setupDetails.push("⚖️ Price Below VWAP");
+                if (currentEma20 < currentVwap) setupDetails.push("✅ EMA 20 Confirming");
+            }
         }
 
-        if (side) {
+        if (side && setupDetails.length > 0) {
+            
+            // 3. FETCH DERIVATIVES DATA (Funding & Open Interest)
+            let fundingRate = "N/A", openInterest = "N/A", liqAlert = "";
+            try {
+                const funding = await exchange.fetchFundingRate(symbol);
+                if (funding && funding.fundingRate) {
+                    const fr = funding.fundingRate * 100;
+                    fundingRate = `${fr.toFixed(4)}%`;
+                    if (side.includes("LONG") && fr < -0.01) liqAlert = "🔥 High Short-Squeeze Probability";
+                    if (side.includes("SHORT") && fr > 0.01) liqAlert = "🔥 Long-Liquidation Cascade Possible";
+                }
+                const oiData = await exchange.fetchOpenInterest(symbol);
+                if (oiData && oiData.openInterestValue) {
+                    openInterest = `$${(oiData.openInterestValue / 1000000).toFixed(2)}M`;
+                }
+            } catch (e) { /* ignore fetching errors */ }
+
             const baseAsset = symbol.split('/')[0]; 
             const binanceChartUrl = `https://www.tradingview.com/chart/?symbol=BINANCE:${baseAsset}USDT.P`;
             
             // Auto TP/SL Calculation based on ATR
-            let sl, tp1;
-            if (side.includes("LONG")) {
-                sl = currentBB.middle; // Stop Loss at middle band
-                tp1 = currentClose + (currentAtr * 3.0);
-            } else {
-                sl = currentBB.middle; // Stop Loss at middle band
-                tp1 = currentClose - (currentAtr * 3.0);
-            }
-            
+            let sl = side.includes("LONG") ? currentLow - (currentAtr * 1.0) : currentHigh + (currentAtr * 1.0);
+            let tp = side.includes("LONG") ? currentClose + (currentAtr * 2.5) : currentClose - (currentAtr * 2.5);
+
             const message = `
 ${emoji} *${side}*
 --------------------------
-⚡ *Signal:* ${breakoutType}
-✅ *Confirmation:* High Volume + VWAP Trend
+🧩 *Smart Money Concepts:*
+${setupDetails.map(s => s).join("\n")}
+--------------------------
 🪙 *Coin:* #${baseAsset}
 ⏰ *Timeframe:* ${timeframe}
-💰 *Breakout Price:* ${currentClose}
-🎯 *VWAP Level:* ${currentVWAP.toFixed(4)}
+💰 *Price:* ${currentClose}
+📊 *RSI:* ${currentRsi.toFixed(2)} | *ADX:* ${currentAdx.toFixed(2)}
+⚖️ *VWAP:* ${currentVwap.toFixed(4)} | *EMA 20:* ${currentEma20.toFixed(4)}
 --------------------------
-💵 *Take Profit:* ${tp1.toPrecision(5)}
+🏦 *Derivatives Data:*
+*Funding Rate:* ${fundingRate}
+*Open Interest:* ${openInterest}
+*Liquidation Risk:* ${liqAlert || "Normal"}
+--------------------------
+💵 *Take Profit:* ${tp.toPrecision(5)}
 🛑 *Stop Loss:* ${sl.toPrecision(5)}
 --------------------------
 🔗 [Open Binance Chart](${binanceChartUrl})`;
@@ -133,21 +168,20 @@ async function run() {
         const coins = await getFilteredPairs();
         let totalSignals = 0;
         
-        await bot.sendMessage(chatId, `🔍 *Pro Breakout Scanner Started*\nStrategy: Bollinger Bands + VWAP + Volume\nScanning Top ${coins.length} Coins (1h & 4h)...`);
+        await bot.sendMessage(chatId, `🧠 *God-Tier SMC Bot Started*\nTracking Liquidity Sweeps, CHoCH, VWAP, Funding & OI...\nScanning Top ${coins.length} Coins...`);
 
         for (const tf of timeframes) {
             for (const coin of coins) {
                 const signalFound = await analyzeCoin(coin, tf);
                 if (signalFound) totalSignals++;
-                await new Promise(res => setTimeout(res, 300));
+                await new Promise(res => setTimeout(res, 500));
             }
         }
         
-        if (totalSignals === 0) {
-            await bot.sendMessage(chatId, `✅ Scan Finished. No valid institutional breakouts found right now.`);
-        } else {
-            await bot.sendMessage(chatId, `✅ Scan Finished. Found ${totalSignals} Sniper Breakouts!`);
-        }
+        const statusMsg = totalSignals === 0 
+            ? "✅ Scan Finished: No Smart Money manipulation detected right now." 
+            : `✅ Scan Finished: Found ${totalSignals} Institutional Setups.`;
+        await bot.sendMessage(chatId, statusMsg);
     } catch (error) { 
         console.error("Run Error:", error.message); 
     }
