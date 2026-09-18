@@ -67,14 +67,14 @@ const RSI_OVERBOUGHT = 70;
 // ======================================================
 //
 // LONG:
-// RSI bottom can be anywhere from 30 down to 0.
-// Current RSI should still be <= 35.
+// Bottom can be RSI 30 down to 0.
+// Current RSI must still be <= 35.
 //
 // SHORT:
-// RSI top can be anywhere from 70 up to 100.
-// Current RSI should still be >= 65.
+// Top can be RSI 70 up to 100.
+// Current RSI must still be >= 65.
 //
-// This prevents very late entries.
+// Prevents very late entries.
 //
 
 const LONG_MAX_ENTRY_RSI = 35;
@@ -505,6 +505,7 @@ async function analyzeCoin(symbol, timeframe) {
         // --------------------------------------------------
 
         const rsiHistory = [
+            rsi7,
             rsi6,
             rsi5,
             rsi4,
@@ -521,57 +522,66 @@ async function analyzeCoin(symbol, timeframe) {
             Math.max(...rsiHistory);
 
         // ==================================================
-        // ⭐ RSI EXTREME BOTTOM / TOP REVERSAL
+        // ⭐ FLEXIBLE RSI BOTTOM / TOP DETECTION
         // ==================================================
         //
-        // LONG BOTTOM:
+        // LONG:
         //
-        // RSI can go:
+        // RSI bottom can be anywhere from 30 down to 0.
         //
-        // 30 → 25 → 20 → 18 → 21 → 24
+        // Bottom can be 2–6 completed RSI candles back.
         //
-        // OR:
+        // We require:
         //
-        // 20 → 12 → 8 → 11 → 14
+        // 1. A genuine local bottom
+        // 2. Bottom <= 30
+        // 3. Final 2 candles are rising
+        // 4. Current RSI <= 35
         //
-        // OR:
+        // Small pullbacks are allowed.
         //
-        // 25 → 15 → 7 → 4 → 6 → 9 → 13
+        // Example:
         //
-        // Bottom can be 2–6 candles back.
+        // 10 → 14 → 13 → 17 → 19
         //
-        // RSI <= 30 includes extreme values:
-        // 20, 15, 10, 5, 1, etc.
+        // Bottom = 10
         //
-        // Current RSI must still be <= 35.
+        // 17 → 19 = two consecutive rising candles
         //
         //
-        // SHORT TOP:
+        // SHORT:
         //
-        // 70 → 75 → 80 → 78 → 75
+        // RSI top can be anywhere from 70 up to 100.
         //
-        // OR:
+        // Top can be 2–6 completed RSI candles back.
         //
-        // 82 → 91 → 96 → 93 → 89
+        // We require:
         //
-        // OR:
+        // 1. A genuine local top
+        // 2. Top >= 70
+        // 3. Final 2 candles are falling
+        // 4. Current RSI >= 65
         //
-        // 75 → 88 → 96 → 99 → 95 → 91
+        // Small pullbacks are allowed.
         //
-        // Top can be 2–6 candles back.
+        // Example:
         //
-        // RSI >= 70 includes:
-        // 80, 90, 95, 99, 100.
+        // 96 → 92 → 93 → 88 → 84
         //
-        // Current RSI must still be >= 65.
+        // Top = 96
+        //
+        // 88 → 84 = two consecutive falling candles
         // ==================================================
 
         // --------------------------------------------------
         // LONG: Bottom 2 candles back
+        //
         // Example:
+        //
         // 25 → 26 → 28
         //
         // Extreme:
+        //
         // 8 → 11 → 14
         // --------------------------------------------------
 
@@ -585,88 +595,99 @@ async function analyzeCoin(symbol, timeframe) {
 
         // --------------------------------------------------
         // LONG: Bottom 3 candles back
+        //
         // Example:
+        //
         // 25 → 26 → 27 → 29
         //
-        // Extreme:
-        // 8 → 10 → 13 → 16
         // --------------------------------------------------
 
         const longBottom3 =
             rsi3 <= RSI_OVERSOLD &&
             rsi3 < rsi4 &&
             rsi3 < rsi2 &&
-            rsi2 > rsi3 &&
             prevRsi > rsi2 &&
             lastRsi > prevRsi &&
             lastRsi <= LONG_MAX_ENTRY_RSI;
 
         // --------------------------------------------------
         // LONG: Bottom 4 candles back
-        // Example:
-        // 25 → 26 → 27 → 28 → 30
         //
-        // Extreme:
-        // 12 → 8 → 11 → 14 → 17
+        // Small pullback allowed:
+        //
+        // 10 → 14 → 13 → 17 → 19
+        // ↑
+        // bottom
+        //
+        // Final:
+        // 17 → 19
         // --------------------------------------------------
 
         const longBottom4 =
             rsi4 <= RSI_OVERSOLD &&
             rsi4 < rsi5 &&
             rsi4 < rsi3 &&
-            rsi3 > rsi4 &&
-            rsi2 > rsi3 &&
             prevRsi > rsi2 &&
             lastRsi > prevRsi &&
+            lastRsi > rsi4 &&
             lastRsi <= LONG_MAX_ENTRY_RSI;
 
         // --------------------------------------------------
         // LONG: Bottom 5 candles back
         //
         // Example:
-        // 28 → 20 → 12 → 15 → 18 → 21 → 24
         //
-        // Bottom = 12
+        // 28 → 20 → 12 → 15 → 14 → 18 → 21
+        //           ↑
+        //         bottom
+        //
+        // Small pullback allowed:
+        // 15 → 14
+        //
+        // Final:
+        // 18 → 21
         // --------------------------------------------------
 
         const longBottom5 =
             rsi5 <= RSI_OVERSOLD &&
             rsi5 < rsi6 &&
             rsi5 < rsi4 &&
-            rsi4 > rsi5 &&
-            rsi3 > rsi4 &&
-            rsi2 > rsi3 &&
             prevRsi > rsi2 &&
             lastRsi > prevRsi &&
+            lastRsi > rsi5 &&
             lastRsi <= LONG_MAX_ENTRY_RSI;
 
         // --------------------------------------------------
         // LONG: Bottom 6 candles back
         //
         // Example:
-        // 35 → 25 → 15 → 8 → 11 → 14 → 18 → 22
         //
-        // Bottom = 8
+        // 35 → 20 → 10 → 13 → 12 → 16 → 19 → 22
+        //           ↑
+        //         bottom
+        //
+        // Final:
+        // 19 → 22
         // --------------------------------------------------
 
         const longBottom6 =
             rsi6 <= RSI_OVERSOLD &&
             rsi6 < rsi7 &&
             rsi6 < rsi5 &&
-            rsi5 > rsi6 &&
-            rsi4 > rsi5 &&
-            rsi3 > rsi4 &&
-            rsi2 > rsi3 &&
             prevRsi > rsi2 &&
             lastRsi > prevRsi &&
+            lastRsi > rsi6 &&
             lastRsi <= LONG_MAX_ENTRY_RSI;
 
         // --------------------------------------------------
         // SHORT: Top 2 candles back
+        //
         // Example:
+        //
         // 75 → 74 → 72
         //
         // Extreme:
+        //
         // 96 → 93 → 89
         // --------------------------------------------------
 
@@ -680,80 +701,83 @@ async function analyzeCoin(symbol, timeframe) {
 
         // --------------------------------------------------
         // SHORT: Top 3 candles back
-        // Example:
-        // 75 → 74 → 73 → 71
         //
-        // Extreme:
-        // 96 → 94 → 91 → 88
+        // Example:
+        //
+        // 75 → 74 → 73 → 71
         // --------------------------------------------------
 
         const shortTop3 =
             rsi3 >= RSI_OVERBOUGHT &&
             rsi3 > rsi4 &&
             rsi3 > rsi2 &&
-            rsi2 < rsi3 &&
             prevRsi < rsi2 &&
             lastRsi < prevRsi &&
             lastRsi >= SHORT_MIN_ENTRY_RSI;
 
         // --------------------------------------------------
         // SHORT: Top 4 candles back
-        // Example:
-        // 75 → 74 → 73 → 72 → 70
         //
-        // Extreme:
-        // 92 → 96 → 94 → 91 → 87
+        // Small pullback allowed:
+        //
+        // 96 → 92 → 93 → 88 → 84
+        // ↑
+        // top
+        //
+        // Final:
+        // 88 → 84
         // --------------------------------------------------
 
         const shortTop4 =
             rsi4 >= RSI_OVERBOUGHT &&
             rsi4 > rsi5 &&
             rsi4 > rsi3 &&
-            rsi3 < rsi4 &&
-            rsi2 < rsi3 &&
             prevRsi < rsi2 &&
             lastRsi < prevRsi &&
+            lastRsi < rsi4 &&
             lastRsi >= SHORT_MIN_ENTRY_RSI;
 
         // --------------------------------------------------
         // SHORT: Top 5 candles back
         //
         // Example:
-        // 65 → 80 → 92 → 88 → 84 → 79 → 74
         //
-        // Top = 92
+        // 65 → 80 → 92 → 88 → 89 → 84 → 80
+        //           ↑
+        //          top
+        //
+        // Small pullback allowed.
         // --------------------------------------------------
 
         const shortTop5 =
             rsi5 >= RSI_OVERBOUGHT &&
             rsi5 > rsi6 &&
             rsi5 > rsi4 &&
-            rsi4 < rsi5 &&
-            rsi3 < rsi4 &&
-            rsi2 < rsi3 &&
             prevRsi < rsi2 &&
             lastRsi < prevRsi &&
+            lastRsi < rsi5 &&
             lastRsi >= SHORT_MIN_ENTRY_RSI;
 
         // --------------------------------------------------
         // SHORT: Top 6 candles back
         //
         // Example:
-        // 60 → 75 → 88 → 96 → 93 → 90 → 85 → 80
         //
-        // Top = 96
+        // 60 → 75 → 96 → 92 → 93 → 88 → 84 → 80
+        //           ↑
+        //          top
+        //
+        // Final:
+        // 88 → 84
         // --------------------------------------------------
 
         const shortTop6 =
             rsi6 >= RSI_OVERBOUGHT &&
             rsi6 > rsi7 &&
             rsi6 > rsi5 &&
-            rsi5 < rsi6 &&
-            rsi4 < rsi5 &&
-            rsi3 < rsi4 &&
-            rsi2 < rsi3 &&
             prevRsi < rsi2 &&
             lastRsi < prevRsi &&
+            lastRsi < rsi6 &&
             lastRsi >= SHORT_MIN_ENTRY_RSI;
 
         // --------------------------------------------------
