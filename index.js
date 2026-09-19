@@ -375,9 +375,6 @@ async function analyzeCoin(symbol, timeframe) {
 
         // --------------------------------------------------
         // CORRECT INDICATOR ALIGNMENT
-        //
-        // Indicator arrays start AFTER their warm-up period.
-        // Do NOT use closePrices index directly.
         // --------------------------------------------------
 
         const rsiOffset =
@@ -522,67 +519,11 @@ async function analyzeCoin(symbol, timeframe) {
             Math.max(...rsiHistory);
 
         // ==================================================
-        // ⭐ FLEXIBLE RSI BOTTOM / TOP DETECTION
-        // ==================================================
-        //
-        // LONG:
-        //
-        // RSI bottom can be anywhere from 30 down to 0.
-        //
-        // Bottom can be 2–6 completed RSI candles back.
-        //
-        // We require:
-        //
-        // 1. A genuine local bottom
-        // 2. Bottom <= 30
-        // 3. Final 2 candles are rising
-        // 4. Current RSI <= 35
-        //
-        // Small pullbacks are allowed.
-        //
-        // Example:
-        //
-        // 10 → 14 → 13 → 17 → 19
-        //
-        // Bottom = 10
-        //
-        // 17 → 19 = two consecutive rising candles
-        //
-        //
-        // SHORT:
-        //
-        // RSI top can be anywhere from 70 up to 100.
-        //
-        // Top can be 2–6 completed RSI candles back.
-        //
-        // We require:
-        //
-        // 1. A genuine local top
-        // 2. Top >= 70
-        // 3. Final 2 candles are falling
-        // 4. Current RSI >= 65
-        //
-        // Small pullbacks are allowed.
-        //
-        // Example:
-        //
-        // 96 → 92 → 93 → 88 → 84
-        //
-        // Top = 96
-        //
-        // 88 → 84 = two consecutive falling candles
+        // FLEXIBLE RSI BOTTOM / TOP DETECTION
         // ==================================================
 
         // --------------------------------------------------
         // LONG: Bottom 2 candles back
-        //
-        // Example:
-        //
-        // 25 → 26 → 28
-        //
-        // Extreme:
-        //
-        // 8 → 11 → 14
         // --------------------------------------------------
 
         const longBottom2 =
@@ -595,11 +536,6 @@ async function analyzeCoin(symbol, timeframe) {
 
         // --------------------------------------------------
         // LONG: Bottom 3 candles back
-        //
-        // Example:
-        //
-        // 25 → 26 → 27 → 29
-        //
         // --------------------------------------------------
 
         const longBottom3 =
@@ -612,15 +548,6 @@ async function analyzeCoin(symbol, timeframe) {
 
         // --------------------------------------------------
         // LONG: Bottom 4 candles back
-        //
-        // Small pullback allowed:
-        //
-        // 10 → 14 → 13 → 17 → 19
-        // ↑
-        // bottom
-        //
-        // Final:
-        // 17 → 19
         // --------------------------------------------------
 
         const longBottom4 =
@@ -634,18 +561,6 @@ async function analyzeCoin(symbol, timeframe) {
 
         // --------------------------------------------------
         // LONG: Bottom 5 candles back
-        //
-        // Example:
-        //
-        // 28 → 20 → 12 → 15 → 14 → 18 → 21
-        //           ↑
-        //         bottom
-        //
-        // Small pullback allowed:
-        // 15 → 14
-        //
-        // Final:
-        // 18 → 21
         // --------------------------------------------------
 
         const longBottom5 =
@@ -659,15 +574,6 @@ async function analyzeCoin(symbol, timeframe) {
 
         // --------------------------------------------------
         // LONG: Bottom 6 candles back
-        //
-        // Example:
-        //
-        // 35 → 20 → 10 → 13 → 12 → 16 → 19 → 22
-        //           ↑
-        //         bottom
-        //
-        // Final:
-        // 19 → 22
         // --------------------------------------------------
 
         const longBottom6 =
@@ -681,14 +587,6 @@ async function analyzeCoin(symbol, timeframe) {
 
         // --------------------------------------------------
         // SHORT: Top 2 candles back
-        //
-        // Example:
-        //
-        // 75 → 74 → 72
-        //
-        // Extreme:
-        //
-        // 96 → 93 → 89
         // --------------------------------------------------
 
         const shortTop2 =
@@ -701,10 +599,6 @@ async function analyzeCoin(symbol, timeframe) {
 
         // --------------------------------------------------
         // SHORT: Top 3 candles back
-        //
-        // Example:
-        //
-        // 75 → 74 → 73 → 71
         // --------------------------------------------------
 
         const shortTop3 =
@@ -717,15 +611,6 @@ async function analyzeCoin(symbol, timeframe) {
 
         // --------------------------------------------------
         // SHORT: Top 4 candles back
-        //
-        // Small pullback allowed:
-        //
-        // 96 → 92 → 93 → 88 → 84
-        // ↑
-        // top
-        //
-        // Final:
-        // 88 → 84
         // --------------------------------------------------
 
         const shortTop4 =
@@ -739,14 +624,6 @@ async function analyzeCoin(symbol, timeframe) {
 
         // --------------------------------------------------
         // SHORT: Top 5 candles back
-        //
-        // Example:
-        //
-        // 65 → 80 → 92 → 88 → 89 → 84 → 80
-        //           ↑
-        //          top
-        //
-        // Small pullback allowed.
         // --------------------------------------------------
 
         const shortTop5 =
@@ -760,15 +637,6 @@ async function analyzeCoin(symbol, timeframe) {
 
         // --------------------------------------------------
         // SHORT: Top 6 candles back
-        //
-        // Example:
-        //
-        // 60 → 75 → 96 → 92 → 93 → 88 → 84 → 80
-        //           ↑
-        //          top
-        //
-        // Final:
-        // 88 → 84
         // --------------------------------------------------
 
         const shortTop6 =
@@ -820,8 +688,6 @@ async function analyzeCoin(symbol, timeframe) {
 
         // --------------------------------------------------
         // SUPPORT / RESISTANCE
-        // Use previous candles only.
-        // Do not include current candle.
         // --------------------------------------------------
 
         const structureStart =
@@ -900,13 +766,19 @@ async function analyzeCoin(symbol, timeframe) {
         const adxStrong =
             lastAdx >= 20;
 
+        // ==================================================
+        // FIXED DIRECTIONAL EXHAUSTION
+        // ==================================================
+
         const sellersExhausted =
             prevAdx > 25 &&
-            adxFalling;
+            adxFalling &&
+            isRsiBottomHook;
 
         const buyersExhausted =
             prevAdx > 25 &&
-            adxFalling;
+            adxFalling &&
+            isRsiTopHook;
 
         // --------------------------------------------------
         // CANDLE PATTERN
@@ -1173,10 +1045,10 @@ async function analyzeCoin(symbol, timeframe) {
         // --------------------------------------------------
         // EMA / VWAP
         //
-        // These are confirmation only.
+        // Directional confirmation only.
         // --------------------------------------------------
 
-        if (priceAboveEMA) {
+        if (priceAboveEMA && isRsiBottomHook) {
 
             longScore += 1;
 
@@ -1185,7 +1057,7 @@ async function analyzeCoin(symbol, timeframe) {
             );
         }
 
-        if (priceBelowEMA) {
+        if (priceBelowEMA && isRsiTopHook) {
 
             shortScore += 1;
 
@@ -1194,7 +1066,7 @@ async function analyzeCoin(symbol, timeframe) {
             );
         }
 
-        if (priceAboveVWAP) {
+        if (priceAboveVWAP && isRsiBottomHook) {
 
             longScore += 1;
 
@@ -1203,7 +1075,7 @@ async function analyzeCoin(symbol, timeframe) {
             );
         }
 
-        if (priceBelowVWAP) {
+        if (priceBelowVWAP && isRsiTopHook) {
 
             shortScore += 1;
 
@@ -1676,8 +1548,7 @@ async function run() {
 🪙 Coins: ${coins.length}
 ⏰ Timeframes: 4H / 1D / 1W
 
-🎯 RSI Bottom/Top Hook + Divergence + Liquidity + Volume + EMA + VWAP + ADX`
-            ,
+🎯 RSI Bottom/Top Hook + Divergence + Liquidity + Volume + EMA + VWAP + ADX`,
             {
                 parse_mode: 'Markdown'
             }
