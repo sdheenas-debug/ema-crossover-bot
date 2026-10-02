@@ -1,14 +1,5 @@
 import ccxt from 'ccxt';
-import pkg from 'technicalindicators';
 import TelegramBot from 'node-telegram-bot-api';
-
-const {
-    EMA,
-    RSI,
-    ADX,
-    ATR,
-    SMA
-} = pkg;
 
 // ======================================================
 // ENV
@@ -38,59 +29,17 @@ const exchange = new ccxt.bitget({
 // SETTINGS
 // ======================================================
 
-const TIMEFRAMES = ['4h', '1d', '1w'];
+const TIMEFRAMES = ['4h', '1d'];
 
-const MAX_COINS = 600;
-
-const MIN_QUOTE_VOLUME = 500000;
-
-const MAX_PRICE = 15;
-
-const CANDLE_LIMIT = 150;
-
-const RSI_PERIOD = 14;
+const CANDLE_LIMIT = 100;
 
 const EMA_PERIOD = 20;
 
-const ATR_PERIOD = 14;
+// Scan ALL USDT perpetual coins.
+// No price filter.
+// No volume filter.
 
-const ADX_PERIOD = 14;
-
-const VOLUME_MA_PERIOD = 20;
-
-const RSI_OVERSOLD = 30;
-
-const RSI_OVERBOUGHT = 70;
-
-// ======================================================
-// RSI ENTRY FRESHNESS
-// ======================================================
-//
-// LONG:
-// Bottom can be RSI 30 down to 0.
-// Current RSI must still be <= 35.
-//
-// SHORT:
-// Top can be RSI 70 up to 100.
-// Current RSI must still be >= 65.
-//
-// Prevents very late entries.
-//
-
-const LONG_MAX_ENTRY_RSI = 35;
-
-const SHORT_MIN_ENTRY_RSI = 65;
-
-// ======================================================
-// MAJOR COINS
-// ======================================================
-
-const majorCoins = [
-    'BTC/USDT',
-    'BNB/USDT',
-    'SOL/USDT',
-    'ETH/USDT'
-];
+const SCAN_DELAY = 250;
 
 // ======================================================
 // DUPLICATE PROTECTION
@@ -115,172 +64,125 @@ function sleep(ms) {
 // ======================================================
 
 function safeNumber(value, fallback = 0) {
-    return Number.isFinite(value) ? value : fallback;
+    const number = Number(value);
+
+    return Number.isFinite(number)
+        ? number
+        : fallback;
 }
 
 // ======================================================
-// GET FILTERED PAIRS
+// EMA
 // ======================================================
 
-async function getFilteredPairs() {
+function calculateEMA(values, period) {
+
+    if (!values || values.length < period) {
+        return [];
+    }
+
+    const multiplier = 2 / (period + 1);
+
+    const ema = [];
+
+    // Initial SMA
+    let sum = 0;
+
+    for (let i = 0; i < period; i++) {
+        sum += values[i];
+    }
+
+    let previousEMA = sum / period;
+
+    ema.push(previousEMA);
+
+    // Remaining EMA values
+    for (let i = period; i < values.length; i++) {
+
+        const currentEMA =
+            (
+                values[i] - previousEMA
+            ) * multiplier +
+            previousEMA;
+
+        ema.push(currentEMA);
+
+        previousEMA = currentEMA;
+    }
+
+    return ema;
+}
+
+// ======================================================
+// GET ALL USDT PERPETUAL COINS
+// ======================================================
+
+async function getAllUSDTPerpetualCoins() {
 
     try {
 
-        const tickers = await exchange.fetchTickers();
+        console.log('Loading Bitget markets...');
 
-        const filteredSymbols = [];
+        await exchange.loadMarkets();
 
-        for (const symbol of Object.keys(tickers)) {
+        const symbols = [];
+
+        for (const symbol of Object.keys(exchange.markets)) {
 
             try {
 
-                const ticker = tickers[symbol];
+                const market =
+                    exchange.markets[symbol];
 
-                if (!ticker) continue;
+                if (!market) continue;
 
-                const last = safeNumber(ticker.last);
-                const quoteVolume = safeNumber(ticker.quoteVolume);
+                // Only swap contracts
+                if (!market.swap) continue;
 
-                if (!last || !quoteVolume) continue;
-
-                // Only USDT contracts
-                if (!symbol.endsWith('USDT')) continue;
-
-                const base = symbol.split('/')[0];
-
-                const isMajor = majorCoins.includes(symbol);
-
-                const isCheap = last < MAX_PRICE;
+                // Only linear USDT contracts
+                if (!market.linear) continue;
 
                 if (
-                    (isMajor || isCheap) &&
-                    quoteVolume > MIN_QUOTE_VOLUME
+                    market.quote !== 'USDT'
                 ) {
-                    filteredSymbols.push({
-                        symbol,
-                        quoteVolume
-                    });
+                    continue;
                 }
 
-            } catch (err) {
+                // Active markets only
+                if (
+                    market.active === false
+                ) {
+                    continue;
+                }
+
+                symbols.push(symbol);
+
+            } catch (error) {
+
                 console.error(
-                    `Ticker error ${symbol}:`,
-                    err.message
+                    `Market filter error ${symbol}:`,
+                    error.message
                 );
             }
         }
 
-        filteredSymbols.sort(
-            (a, b) => b.quoteVolume - a.quoteVolume
-        );
-
-        const result = filteredSymbols
-            .slice(0, MAX_COINS)
-            .map(x => x.symbol);
+        symbols.sort();
 
         console.log(
-            `Filtered ${result.length} symbols`
+            `Found ${symbols.length} USDT perpetual coins`
         );
 
-        return result;
+        return symbols;
 
     } catch (error) {
 
         console.error(
-            'getFilteredPairs error:',
+            'Market loading error:',
             error.message
         );
 
         return [];
     }
-}
-
-// ======================================================
-// VWAP
-// ======================================================
-
-function calculateVWAP(
-    highPrices,
-    lowPrices,
-    closePrices,
-    volumes,
-    startIndex,
-    endIndex
-) {
-
-    let sumTPV = 0;
-    let sumVolume = 0;
-
-    for (
-        let i = startIndex;
-        i <= endIndex;
-        i++
-    ) {
-
-        const typicalPrice =
-            (
-                highPrices[i] +
-                lowPrices[i] +
-                closePrices[i]
-            ) / 3;
-
-        const volume = volumes[i];
-
-        sumTPV += typicalPrice * volume;
-        sumVolume += volume;
-    }
-
-    if (sumVolume === 0) {
-        return 0;
-    }
-
-    return sumTPV / sumVolume;
-}
-
-// ======================================================
-// RSI DIVERGENCE
-// ======================================================
-
-function detectBullishDivergence(
-    lows,
-    rsiValues,
-    candleStartIndex,
-    rsiStartIndex
-) {
-
-    if (candleStartIndex < 2) return false;
-
-    const priceCurrent = lows[candleStartIndex];
-    const pricePrevious = lows[candleStartIndex - 1];
-
-    const rsiCurrent = rsiValues[rsiStartIndex];
-    const rsiPrevious = rsiValues[rsiStartIndex - 1];
-
-    return (
-        priceCurrent < pricePrevious &&
-        rsiCurrent > rsiPrevious
-    );
-}
-
-function detectBearishDivergence(
-    highs,
-    rsiValues,
-    candleStartIndex,
-    rsiStartIndex
-) {
-
-    if (candleStartIndex < 2) return false;
-
-    const priceCurrent = highs[candleStartIndex];
-    const pricePrevious = highs[candleStartIndex - 1];
-
-    const rsiCurrent = rsiValues[rsiStartIndex];
-    const rsiPrevious = rsiValues[rsiStartIndex - 1];
-
-    return (
-        priceCurrent > pricePrevious &&
-        rsiCurrent < rsiPrevious
-    );
 }
 
 // ======================================================
@@ -291,946 +193,424 @@ async function analyzeCoin(symbol, timeframe) {
 
     try {
 
-        // --------------------------------------------------
-        // FETCH CANDLES
-        // --------------------------------------------------
+        // ==================================================
+        // FETCH OHLCV
+        // ==================================================
 
-        const candles = await exchange.fetchOHLCV(
-            symbol,
-            timeframe,
-            undefined,
-            CANDLE_LIMIT
-        );
+        const candles =
+            await exchange.fetchOHLCV(
+                symbol,
+                timeframe,
+                undefined,
+                CANDLE_LIMIT
+            );
 
-        if (!candles || candles.length < 80) {
+        if (
+            !candles ||
+            candles.length < EMA_PERIOD + 5
+        ) {
             return false;
         }
 
-        // --------------------------------------------------
-        // IMPORTANT:
-        // Last candle is normally still forming.
-        // We use the LAST COMPLETED candle.
-        // --------------------------------------------------
+        // ==================================================
+        // CLOSED CANDLES
+        // ==================================================
 
-        const lastClosedCandleIndex = candles.length - 2;
+        /*
+         *
+         * candles[candles.length - 1]
+         * = current candle, normally still forming
+         *
+         * candles[candles.length - 2]
+         * = LAST COMPLETED CANDLE
+         *
+         * candles[candles.length - 3]
+         * = PREVIOUS COMPLETED CANDLE
+         *
+         */
 
-        const previousClosedCandleIndex =
+        const lastClosedIndex =
+            candles.length - 2;
+
+        const previousClosedIndex =
             candles.length - 3;
 
         if (
-            lastClosedCandleIndex < 50 ||
-            previousClosedCandleIndex < 0
+            previousClosedIndex < EMA_PERIOD
         ) {
             return false;
         }
 
-        // --------------------------------------------------
-        // OHLCV
-        // --------------------------------------------------
+        // ==================================================
+        // PRICE ARRAYS
+        // ==================================================
 
-        const timestamps = candles.map(c => c[0]);
+        const timestamps =
+            candles.map(c => c[0]);
 
-        const openPrices = candles.map(c => c[1]);
+        const opens =
+            candles.map(c => safeNumber(c[1]));
 
-        const highPrices = candles.map(c => c[2]);
+        const highs =
+            candles.map(c => safeNumber(c[2]));
 
-        const lowPrices = candles.map(c => c[3]);
+        const lows =
+            candles.map(c => safeNumber(c[3]));
 
-        const closePrices = candles.map(c => c[4]);
+        const closes =
+            candles.map(c => safeNumber(c[4]));
 
-        const volumes = candles.map(c => c[5]);
+        const volumes =
+            candles.map(c => safeNumber(c[5]));
 
-        // --------------------------------------------------
-        // INDICATORS
-        // --------------------------------------------------
+        // ==================================================
+        // EMA20
+        // ==================================================
 
-        const rsiArr = RSI.calculate({
-            period: RSI_PERIOD,
-            values: closePrices
-        });
+        const ema20 =
+            calculateEMA(
+                closes,
+                EMA_PERIOD
+            );
 
-        const adxArr = ADX.calculate({
-            high: highPrices,
-            low: lowPrices,
-            close: closePrices,
-            period: ADX_PERIOD
-        });
-
-        const atrArr = ATR.calculate({
-            high: highPrices,
-            low: lowPrices,
-            close: closePrices,
-            period: ATR_PERIOD
-        });
-
-        const ema20Arr = EMA.calculate({
-            period: EMA_PERIOD,
-            values: closePrices
-        });
-
-        const volMaArr = SMA.calculate({
-            period: VOLUME_MA_PERIOD,
-            values: volumes
-        });
-
-        // --------------------------------------------------
-        // CORRECT INDICATOR ALIGNMENT
-        // --------------------------------------------------
-
-        const rsiOffset =
-            closePrices.length - rsiArr.length;
-
-        const adxOffset =
-            closePrices.length - adxArr.length;
-
-        const atrOffset =
-            closePrices.length - atrArr.length;
+        /*
+         * EMA array starts from candle index:
+         *
+         * EMA_PERIOD - 1
+         *
+         * Example:
+         *
+         * candles:
+         * 0 1 2 ... 19 20 21
+         *
+         * EMA:
+         *             0  1  2
+         *
+         */
 
         const emaOffset =
-            closePrices.length - ema20Arr.length;
+            EMA_PERIOD - 1;
 
-        const volOffset =
-            closePrices.length - volMaArr.length;
+        const lastEMAIndex =
+            lastClosedIndex - emaOffset;
 
-        const rsiIndex =
-            lastClosedCandleIndex - rsiOffset;
-
-        const rsiPrevIndex =
-            previousClosedCandleIndex - rsiOffset;
-
-        const adxIndex =
-            lastClosedCandleIndex - adxOffset;
-
-        const adxPrevIndex =
-            previousClosedCandleIndex - adxOffset;
-
-        const atrIndex =
-            lastClosedCandleIndex - atrOffset;
-
-        const emaIndex =
-            lastClosedCandleIndex - emaOffset;
-
-        const volIndex =
-            lastClosedCandleIndex - volOffset;
-
-        // --------------------------------------------------
-        // VALIDATION
-        // --------------------------------------------------
+        const previousEMAIndex =
+            previousClosedIndex - emaOffset;
 
         if (
-            rsiIndex < 7 ||
-            rsiPrevIndex < 0 ||
-            adxIndex < 1 ||
-            adxPrevIndex < 0 ||
-            atrIndex < 0 ||
-            emaIndex < 0 ||
-            volIndex < 0
+            lastEMAIndex < 1 ||
+            previousEMAIndex < 0
         ) {
             return false;
         }
 
-        // --------------------------------------------------
-        // INDICATOR VALUES
-        // --------------------------------------------------
+        const lastEMA20 =
+            ema20[lastEMAIndex];
 
-        const lastRsi =
-            rsiArr[rsiIndex];
+        const previousEMA20 =
+            ema20[previousEMAIndex];
 
-        const prevRsi =
-            rsiArr[rsiPrevIndex];
-
-        const rsi2 =
-            rsiArr[rsiIndex - 2];
-
-        const rsi3 =
-            rsiArr[rsiIndex - 3];
-
-        const rsi4 =
-            rsiArr[rsiIndex - 4];
-
-        const rsi5 =
-            rsiArr[rsiIndex - 5];
-
-        const rsi6 =
-            rsiArr[rsiIndex - 6];
-
-        const rsi7 =
-            rsiArr[rsiIndex - 7];
-
-        const lastAdx =
-            adxArr[adxIndex].adx;
-
-        const prevAdx =
-            adxArr[adxPrevIndex].adx;
-
-        const lastAtr =
-            atrArr[atrIndex];
-
-        const lastEma20 =
-            ema20Arr[emaIndex];
-
-        const volMa =
-            volMaArr[volIndex];
-
-        // --------------------------------------------------
+        // ==================================================
         // CLOSED CANDLE DATA
-        // --------------------------------------------------
+        // ==================================================
 
         const lastOpen =
-            openPrices[lastClosedCandleIndex];
+            opens[lastClosedIndex];
 
         const lastHigh =
-            highPrices[lastClosedCandleIndex];
+            highs[lastClosedIndex];
 
         const lastLow =
-            lowPrices[lastClosedCandleIndex];
+            lows[lastClosedIndex];
 
         const lastClose =
-            closePrices[lastClosedCandleIndex];
+            closes[lastClosedIndex];
 
-        const currentVolume =
-            volumes[lastClosedCandleIndex];
+        const previousClose =
+            closes[previousClosedIndex];
 
-        const prevOpen =
-            openPrices[previousClosedCandleIndex];
-
-        const prevClose =
-            closePrices[previousClosedCandleIndex];
-
-        // --------------------------------------------------
-        // RSI HISTORY
-        // --------------------------------------------------
-
-        const rsiHistory = [
-            rsi7,
-            rsi6,
-            rsi5,
-            rsi4,
-            rsi3,
-            rsi2,
-            prevRsi,
-            lastRsi
-        ];
-
-        const lowestRecentRsi =
-            Math.min(...rsiHistory);
-
-        const highestRecentRsi =
-            Math.max(...rsiHistory);
+        const previousOpen =
+            opens[previousClosedIndex];
 
         // ==================================================
-        // FLEXIBLE RSI BOTTOM / TOP DETECTION
+        // EMA CROSS
         // ==================================================
 
-        // --------------------------------------------------
-        // LONG: Bottom 2 candles back
-        // --------------------------------------------------
+        /*
+         * LONG:
+         *
+         * Previous candle CLOSE <= previous EMA20
+         *
+         * Latest closed candle CLOSE > latest EMA20
+         */
 
-        const longBottom2 =
-            rsi2 <= RSI_OVERSOLD &&
-            rsi2 < rsi3 &&
-            rsi2 < prevRsi &&
-            prevRsi > rsi2 &&
-            lastRsi > prevRsi &&
-            lastRsi <= LONG_MAX_ENTRY_RSI;
+        const bullishCross =
+            previousClose <= previousEMA20 &&
+            lastClose > lastEMA20;
 
-        // --------------------------------------------------
-        // LONG: Bottom 3 candles back
-        // --------------------------------------------------
+        /*
+         * SHORT:
+         *
+         * Previous candle CLOSE >= previous EMA20
+         *
+         * Latest closed candle CLOSE < latest EMA20
+         */
 
-        const longBottom3 =
-            rsi3 <= RSI_OVERSOLD &&
-            rsi3 < rsi4 &&
-            rsi3 < rsi2 &&
-            prevRsi > rsi2 &&
-            lastRsi > prevRsi &&
-            lastRsi <= LONG_MAX_ENTRY_RSI;
+        const bearishCross =
+            previousClose >= previousEMA20 &&
+            lastClose < lastEMA20;
 
-        // --------------------------------------------------
-        // LONG: Bottom 4 candles back
-        // --------------------------------------------------
-
-        const longBottom4 =
-            rsi4 <= RSI_OVERSOLD &&
-            rsi4 < rsi5 &&
-            rsi4 < rsi3 &&
-            prevRsi > rsi2 &&
-            lastRsi > prevRsi &&
-            lastRsi > rsi4 &&
-            lastRsi <= LONG_MAX_ENTRY_RSI;
-
-        // --------------------------------------------------
-        // LONG: Bottom 5 candles back
-        // --------------------------------------------------
-
-        const longBottom5 =
-            rsi5 <= RSI_OVERSOLD &&
-            rsi5 < rsi6 &&
-            rsi5 < rsi4 &&
-            prevRsi > rsi2 &&
-            lastRsi > prevRsi &&
-            lastRsi > rsi5 &&
-            lastRsi <= LONG_MAX_ENTRY_RSI;
-
-        // --------------------------------------------------
-        // LONG: Bottom 6 candles back
-        // --------------------------------------------------
-
-        const longBottom6 =
-            rsi6 <= RSI_OVERSOLD &&
-            rsi6 < rsi7 &&
-            rsi6 < rsi5 &&
-            prevRsi > rsi2 &&
-            lastRsi > prevRsi &&
-            lastRsi > rsi6 &&
-            lastRsi <= LONG_MAX_ENTRY_RSI;
-
-        // --------------------------------------------------
-        // SHORT: Top 2 candles back
-        // --------------------------------------------------
-
-        const shortTop2 =
-            rsi2 >= RSI_OVERBOUGHT &&
-            rsi2 > rsi3 &&
-            rsi2 > prevRsi &&
-            prevRsi < rsi2 &&
-            lastRsi < prevRsi &&
-            lastRsi >= SHORT_MIN_ENTRY_RSI;
-
-        // --------------------------------------------------
-        // SHORT: Top 3 candles back
-        // --------------------------------------------------
-
-        const shortTop3 =
-            rsi3 >= RSI_OVERBOUGHT &&
-            rsi3 > rsi4 &&
-            rsi3 > rsi2 &&
-            prevRsi < rsi2 &&
-            lastRsi < prevRsi &&
-            lastRsi >= SHORT_MIN_ENTRY_RSI;
-
-        // --------------------------------------------------
-        // SHORT: Top 4 candles back
-        // --------------------------------------------------
-
-        const shortTop4 =
-            rsi4 >= RSI_OVERBOUGHT &&
-            rsi4 > rsi5 &&
-            rsi4 > rsi3 &&
-            prevRsi < rsi2 &&
-            lastRsi < prevRsi &&
-            lastRsi < rsi4 &&
-            lastRsi >= SHORT_MIN_ENTRY_RSI;
-
-        // --------------------------------------------------
-        // SHORT: Top 5 candles back
-        // --------------------------------------------------
-
-        const shortTop5 =
-            rsi5 >= RSI_OVERBOUGHT &&
-            rsi5 > rsi6 &&
-            rsi5 > rsi4 &&
-            prevRsi < rsi2 &&
-            lastRsi < prevRsi &&
-            lastRsi < rsi5 &&
-            lastRsi >= SHORT_MIN_ENTRY_RSI;
-
-        // --------------------------------------------------
-        // SHORT: Top 6 candles back
-        // --------------------------------------------------
-
-        const shortTop6 =
-            rsi6 >= RSI_OVERBOUGHT &&
-            rsi6 > rsi7 &&
-            rsi6 > rsi5 &&
-            prevRsi < rsi2 &&
-            lastRsi < prevRsi &&
-            lastRsi < rsi6 &&
-            lastRsi >= SHORT_MIN_ENTRY_RSI;
-
-        // --------------------------------------------------
-        // FINAL CONFIRMED RSI SIGNAL
-        // --------------------------------------------------
-
-        const isRsiBottomHook =
-            longBottom2 ||
-            longBottom3 ||
-            longBottom4 ||
-            longBottom5 ||
-            longBottom6;
-
-        const isRsiTopHook =
-            shortTop2 ||
-            shortTop3 ||
-            shortTop4 ||
-            shortTop5 ||
-            shortTop6;
-
-        // --------------------------------------------------
-        // RSI DIVERGENCE
-        // --------------------------------------------------
-
-        const bullishDivergence =
-            detectBullishDivergence(
-                lowPrices,
-                rsiArr,
-                lastClosedCandleIndex,
-                rsiIndex
-            );
-
-        const bearishDivergence =
-            detectBearishDivergence(
-                highPrices,
-                rsiArr,
-                lastClosedCandleIndex,
-                rsiIndex
-            );
-
-        // --------------------------------------------------
-        // SUPPORT / RESISTANCE
-        // --------------------------------------------------
-
-        const structureStart =
-            Math.max(
-                0,
-                lastClosedCandleIndex - 12
-            );
-
-        const structureEnd =
-            lastClosedCandleIndex - 2;
-
-        const recentLows =
-            lowPrices.slice(
-                structureStart,
-                structureEnd + 1
-            );
-
-        const recentHighs =
-            highPrices.slice(
-                structureStart,
-                structureEnd + 1
-            );
+        // ==================================================
+        // NO CROSS
+        // ==================================================
 
         if (
-            recentLows.length < 5 ||
-            recentHighs.length < 5
+            !bullishCross &&
+            !bearishCross
         ) {
             return false;
         }
 
-        const support =
-            Math.min(...recentLows);
-
-        const resistance =
-            Math.max(...recentHighs);
-
-        // --------------------------------------------------
-        // LIQUIDITY SWEEP
-        // --------------------------------------------------
-
-        const isBullishSweep =
-            lastLow < support &&
-            lastClose > support;
-
-        const isBearishSweep =
-            lastHigh > resistance &&
-            lastClose < resistance;
-
-        // --------------------------------------------------
-        // MARKET STRUCTURE
-        // --------------------------------------------------
-
-        const isBullishBOS =
-            lastClose > resistance;
-
-        const isBearishBOS =
-            lastClose < support;
-
-        // --------------------------------------------------
-        // VOLUME
-        // --------------------------------------------------
-
-        const volumeSpike =
-            currentVolume > volMa * 1.8;
-
-        const volumeAboveAverage =
-            currentVolume > volMa;
-
-        // --------------------------------------------------
-        // ADX
-        // --------------------------------------------------
-
-        const adxFalling =
-            lastAdx < prevAdx;
-
-        const adxStrong =
-            lastAdx >= 20;
-
         // ==================================================
-        // FIXED DIRECTIONAL EXHAUSTION
+        // SIDE
         // ==================================================
 
-        const sellersExhausted =
-            prevAdx > 25 &&
-            adxFalling &&
-            isRsiBottomHook;
+        let side;
+        let emoji;
 
-        const buyersExhausted =
-            prevAdx > 25 &&
-            adxFalling &&
-            isRsiTopHook;
+        if (bullishCross) {
 
-        // --------------------------------------------------
-        // CANDLE PATTERN
-        // --------------------------------------------------
+            side = 'LONG';
+            emoji = '🟢';
+
+        } else {
+
+            side = 'SHORT';
+            emoji = '🔴';
+        }
+
+        // ==================================================
+        // CANDLE TYPE
+        // ==================================================
 
         const body =
             Math.abs(
                 lastClose - lastOpen
             );
 
-        const lowerWick =
-            Math.min(
-                lastOpen,
-                lastClose
-            ) - lastLow;
+        const candleRange =
+            lastHigh - lastLow;
 
-        const upperWick =
-            lastHigh -
-            Math.max(
-                lastOpen,
-                lastClose
-            );
-
-        let candlePattern = 'Normal';
+        let candleType =
+            'Normal';
 
         if (
-            body > 0 &&
-            lowerWick >= body * 2 &&
-            upperWick <= body * 0.5
+            lastClose > lastOpen
         ) {
 
-            candlePattern =
-                '🔨 Bullish Hammer';
+            candleType =
+                '🟢 Bullish Candle';
 
         } else if (
-            prevClose < prevOpen &&
-            lastClose > lastOpen &&
-            lastClose > prevOpen
+            lastClose < lastOpen
         ) {
 
-            candlePattern =
-                '🐂 Bullish Engulfing';
-
-        } else if (
-            body > 0 &&
-            upperWick >= body * 2 &&
-            lowerWick <= body * 0.5
-        ) {
-
-            candlePattern =
-                '🌠 Bearish Shooting Star';
-
-        } else if (
-            prevClose > prevOpen &&
-            lastClose < lastOpen &&
-            lastClose < prevOpen
-        ) {
-
-            candlePattern =
-                '🐻 Bearish Engulfing';
-        }
-
-        // --------------------------------------------------
-        // CANDLE CONFIRMATION
-        // --------------------------------------------------
-
-        const bullishCandle =
-            candlePattern === '🔨 Bullish Hammer' ||
-            candlePattern === '🐂 Bullish Engulfing';
-
-        const bearishCandle =
-            candlePattern === '🌠 Bearish Shooting Star' ||
-            candlePattern === '🐻 Bearish Engulfing';
-
-        // --------------------------------------------------
-        // VWAP
-        // --------------------------------------------------
-
-        const vwapStart =
-            Math.max(
-                0,
-                lastClosedCandleIndex - 20
-            );
-
-        const lastVwap =
-            calculateVWAP(
-                highPrices,
-                lowPrices,
-                closePrices,
-                volumes,
-                vwapStart,
-                lastClosedCandleIndex
-            );
-
-        // --------------------------------------------------
-        // EMA / VWAP LOCATION
-        // --------------------------------------------------
-
-        const priceAboveEMA =
-            lastClose > lastEma20;
-
-        const priceBelowEMA =
-            lastClose < lastEma20;
-
-        const priceAboveVWAP =
-            lastClose > lastVwap;
-
-        const priceBelowVWAP =
-            lastClose < lastVwap;
-
-        // ==================================================
-        // SCORE
-        // ==================================================
-
-        let longScore = 0;
-        let shortScore = 0;
-
-        const longReasons = [];
-        const shortReasons = [];
-
-        // --------------------------------------------------
-        // LONG RSI
-        // --------------------------------------------------
-
-        if (isRsiBottomHook) {
-
-            longScore += 4;
-
-            longReasons.push(
-                `🔥 RSI Bottom Hook ${lowestRecentRsi.toFixed(1)} → ${lastRsi.toFixed(1)}`
-            );
-        }
-
-        if (bullishDivergence) {
-
-            longScore += 3;
-
-            longReasons.push(
-                '📈 Bullish RSI Divergence'
-            );
-        }
-
-        // --------------------------------------------------
-        // SHORT RSI
-        // --------------------------------------------------
-
-        if (isRsiTopHook) {
-
-            shortScore += 4;
-
-            shortReasons.push(
-                `🔥 RSI Top Hook ${highestRecentRsi.toFixed(1)} → ${lastRsi.toFixed(1)}`
-            );
-        }
-
-        if (bearishDivergence) {
-
-            shortScore += 3;
-
-            shortReasons.push(
-                '📉 Bearish RSI Divergence'
-            );
-        }
-
-        // --------------------------------------------------
-        // LIQUIDITY
-        // --------------------------------------------------
-
-        if (isBullishSweep) {
-
-            longScore += 3;
-
-            longReasons.push(
-                '🧹 Bullish Liquidity Sweep'
-            );
-        }
-
-        if (isBearishSweep) {
-
-            shortScore += 3;
-
-            shortReasons.push(
-                '🧹 Bearish Liquidity Sweep'
-            );
-        }
-
-        // --------------------------------------------------
-        // CANDLE
-        // --------------------------------------------------
-
-        if (bullishCandle) {
-
-            longScore += 2;
-
-            longReasons.push(
-                `🕯️ ${candlePattern}`
-            );
-        }
-
-        if (bearishCandle) {
-
-            shortScore += 2;
-
-            shortReasons.push(
-                `🕯️ ${candlePattern}`
-            );
-        }
-
-        // --------------------------------------------------
-        // VOLUME
-        // --------------------------------------------------
-
-        if (volumeSpike) {
-
-            longScore += 1;
-            shortScore += 1;
-
-            longReasons.push(
-                '🔥 Volume Spike'
-            );
-
-            shortReasons.push(
-                '🔥 Volume Spike'
-            );
-
-        } else if (volumeAboveAverage) {
-
-            longScore += 0.5;
-            shortScore += 0.5;
-        }
-
-        // --------------------------------------------------
-        // ADX
-        // --------------------------------------------------
-
-        if (adxStrong) {
-
-            longScore += 1;
-            shortScore += 1;
-        }
-
-        // --------------------------------------------------
-        // EXHAUSTION
-        // --------------------------------------------------
-
-        if (sellersExhausted) {
-
-            longScore += 2;
-
-            longReasons.push(
-                '🔥 Sellers Exhausted'
-            );
-        }
-
-        if (buyersExhausted) {
-
-            shortScore += 2;
-
-            shortReasons.push(
-                '🔥 Buyers Exhausted'
-            );
-        }
-
-        // --------------------------------------------------
-        // EMA / VWAP
-        //
-        // Directional confirmation only.
-        // --------------------------------------------------
-
-        if (priceAboveEMA && isRsiBottomHook) {
-
-            longScore += 1;
-
-            longReasons.push(
-                '📊 Price Above EMA20'
-            );
-        }
-
-        if (priceBelowEMA && isRsiTopHook) {
-
-            shortScore += 1;
-
-            shortReasons.push(
-                '📊 Price Below EMA20'
-            );
-        }
-
-        if (priceAboveVWAP && isRsiBottomHook) {
-
-            longScore += 1;
-
-            longReasons.push(
-                '📌 Price Above VWAP'
-            );
-        }
-
-        if (priceBelowVWAP && isRsiTopHook) {
-
-            shortScore += 1;
-
-            shortReasons.push(
-                '📌 Price Below VWAP'
-            );
-        }
-
-        // ==================================================
-        // SIGNAL DECISION
-        // ==================================================
-
-        let side = null;
-        let emoji = '';
-        let score = 0;
-        let setupMsg = [];
-
-        // RSI hook is mandatory.
-        // Score decides confidence.
-
-        if (
-            isRsiBottomHook &&
-            longScore >= 5 &&
-            longScore > shortScore
-        ) {
-
-            side = 'LONG Opportunity';
-
-            emoji = '🟢';
-
-            score = longScore;
-
-            setupMsg = longReasons;
-
-        } else if (
-            isRsiTopHook &&
-            shortScore >= 5 &&
-            shortScore > longScore
-        ) {
-
-            side = 'SHORT Opportunity';
-
-            emoji = '🔴';
-
-            score = shortScore;
-
-            setupMsg = shortReasons;
-        }
-
-        // No signal
-        if (!side) {
-            return false;
-        }
-
-        // ==================================================
-        // CONFIDENCE
-        // ==================================================
-
-        let confidence = 'MEDIUM';
-
-        if (score >= 10) {
-
-            confidence = 'HIGH';
-
-        } else if (score >= 7) {
-
-            confidence = 'MEDIUM';
+            candleType =
+                '🔴 Bearish Candle';
 
         } else {
 
-            confidence = 'LOW';
+            candleType =
+                '⚪ Doji';
         }
 
         // ==================================================
-        // FUNDING + OI
+        // CANDLE STRENGTH
         // ==================================================
 
-        let fundingStr = 'N/A';
+        let candleStrength =
+            0;
 
-        let oiStr = 'N/A';
+        if (candleRange > 0) {
 
-        let liqData = 'Normal';
-
-        try {
-
-            const funding =
-                await exchange.fetchFundingRate(symbol);
-
-            if (
-                funding &&
-                Number.isFinite(
-                    funding.fundingRate
-                )
-            ) {
-
-                const fr =
-                    funding.fundingRate * 100;
-
-                fundingStr =
-                    `${fr.toFixed(4)}%`;
-
-                if (
-                    side.includes('LONG') &&
-                    fr < -0.01
-                ) {
-
-                    liqData =
-                        '🔥 Short-Squeeze Risk';
-
-                }
-
-                if (
-                    side.includes('SHORT') &&
-                    fr > 0.01
-                ) {
-
-                    liqData =
-                        '🔥 Long-Liquidation Risk';
-                }
-            }
-
-        } catch (error) {
-
-            console.error(
-                `Funding error ${symbol}:`,
-                error.message
-            );
+            candleStrength =
+                (
+                    body /
+                    candleRange
+                ) * 100;
         }
 
-        try {
+        // ==================================================
+        // VOLUME
+        // ==================================================
 
-            const oiData =
-                await exchange.fetchOpenInterest(symbol);
+        const volumeLookback = 20;
 
-            if (
-                oiData &&
-                Number.isFinite(
-                    oiData.openInterestValue
-                )
+        const volumeStart =
+            Math.max(
+                0,
+                lastClosedIndex -
+                volumeLookback
+            );
+
+        const volumeHistory =
+            volumes.slice(
+                volumeStart,
+                lastClosedIndex
+            );
+
+        let averageVolume = 0;
+
+        if (
+            volumeHistory.length
+        ) {
+
+            averageVolume =
+                volumeHistory.reduce(
+                    (sum, value) =>
+                        sum + value,
+                    0
+                ) /
+                volumeHistory.length;
+        }
+
+        const currentVolume =
+            volumes[lastClosedIndex];
+
+        const volumeRatio =
+            averageVolume > 0
+                ? currentVolume /
+                  averageVolume
+                : 0;
+
+        let volumeStatus =
+            'Normal';
+
+        if (
+            volumeRatio >= 2
+        ) {
+
+            volumeStatus =
+                '🔥 Strong Volume';
+
+        } else if (
+            volumeRatio >= 1.3
+        ) {
+
+            volumeStatus =
+                '📈 Above Average';
+
+        } else if (
+            volumeRatio < 0.7
+        ) {
+
+            volumeStatus =
+                '⚠️ Low Volume';
+        }
+
+        // ==================================================
+        // ATR
+        // ==================================================
+
+        const atrPeriod = 14;
+
+        let atr = 0;
+
+        if (
+            candles.length >
+            atrPeriod + 2
+        ) {
+
+            const trueRanges = [];
+
+            for (
+                let i = 1;
+                i < candles.length;
+                i++
             ) {
 
-                oiStr =
-                    `$${(
-                        oiData.openInterestValue /
-                        1000000
-                    ).toFixed(2)}M`;
+                const high =
+                    highs[i];
+
+                const low =
+                    lows[i];
+
+                const previousClosePrice =
+                    closes[i - 1];
+
+                const tr =
+                    Math.max(
+                        high - low,
+                        Math.abs(
+                            high -
+                            previousClosePrice
+                        ),
+                        Math.abs(
+                            low -
+                            previousClosePrice
+                        )
+                    );
+
+                trueRanges.push(tr);
             }
 
-        } catch (error) {
+            const atrValues =
+                trueRanges.slice(
+                    -atrPeriod
+                );
 
-            console.error(
-                `OI error ${symbol}:`,
-                error.message
-            );
+            if (
+                atrValues.length
+            ) {
+
+                atr =
+                    atrValues.reduce(
+                        (sum, value) =>
+                            sum + value,
+                        0
+                    ) /
+                    atrValues.length;
+            }
         }
+
+        // ==================================================
+        // SUPPORT / RESISTANCE
+        // ==================================================
+
+        const structureLookback = 10;
+
+        const structureStart =
+            Math.max(
+                0,
+                lastClosedIndex -
+                structureLookback
+            );
+
+        const structureLows =
+            lows.slice(
+                structureStart,
+                lastClosedIndex
+            );
+
+        const structureHighs =
+            highs.slice(
+                structureStart,
+                lastClosedIndex
+            );
+
+        const support =
+            structureLows.length
+                ? Math.min(
+                    ...structureLows
+                )
+                : lastLow;
+
+        const resistance =
+            structureHighs.length
+                ? Math.max(
+                    ...structureHighs
+                )
+                : lastHigh;
 
         // ==================================================
         // SL / TP
@@ -1240,23 +620,36 @@ async function analyzeCoin(symbol, timeframe) {
         let tp1;
         let tp2;
 
-        if (side.includes('LONG')) {
+        /*
+         * ATR based levels.
+         *
+         * If ATR cannot be calculated,
+         * use percentage fallback.
+         */
 
-            // Swing low + ATR protection
+        const usableATR =
+            atr > 0
+                ? atr
+                : lastClose * 0.02;
+
+        if (
+            side === 'LONG'
+        ) {
+
             sl =
                 Math.min(
                     lastLow,
                     support
                 ) -
-                lastAtr * 0.5;
+                usableATR * 0.5;
 
             tp1 =
                 lastClose +
-                lastAtr * 2;
+                usableATR * 2;
 
             tp2 =
                 lastClose +
-                lastAtr * 3.5;
+                usableATR * 3.5;
 
         } else {
 
@@ -1265,15 +658,15 @@ async function analyzeCoin(symbol, timeframe) {
                     lastHigh,
                     resistance
                 ) +
-                lastAtr * 0.5;
+                usableATR * 0.5;
 
             tp1 =
                 lastClose -
-                lastAtr * 2;
+                usableATR * 2;
 
             tp2 =
                 lastClose -
-                lastAtr * 3.5;
+                usableATR * 3.5;
         }
 
         // ==================================================
@@ -1310,7 +703,7 @@ async function analyzeCoin(symbol, timeframe) {
         // ==================================================
 
         const candleTimestamp =
-            timestamps[lastClosedCandleIndex];
+            timestamps[lastClosedIndex];
 
         const key =
             signalKey(
@@ -1320,116 +713,242 @@ async function analyzeCoin(symbol, timeframe) {
                 candleTimestamp
             );
 
-        if (sentSignals.has(key)) {
-
+        if (
+            sentSignals.has(key)
+        ) {
             return false;
         }
 
         sentSignals.add(key);
 
         // Keep memory manageable
-        if (sentSignals.size > 5000) {
+        if (
+            sentSignals.size > 5000
+        ) {
 
             const first =
-                sentSignals.values().next().value;
+                sentSignals
+                    .values()
+                    .next()
+                    .value;
 
             sentSignals.delete(first);
         }
 
         // ==================================================
-        // CHART
+        // FUNDING
+        // ==================================================
+
+        let fundingStr =
+            'N/A';
+
+        let fundingRate =
+            null;
+
+        try {
+
+            const funding =
+                await exchange.fetchFundingRate(
+                    symbol
+                );
+
+            if (
+                funding &&
+                Number.isFinite(
+                    funding.fundingRate
+                )
+            ) {
+
+                fundingRate =
+                    funding.fundingRate;
+
+                fundingStr =
+                    `${(
+                        fundingRate * 100
+                    ).toFixed(4)}%`;
+            }
+
+        } catch (error) {
+
+            console.error(
+                `Funding error ${symbol}:`,
+                error.message
+            );
+        }
+
+        // ==================================================
+        // OPEN INTEREST
+        // ==================================================
+
+        let oiStr =
+            'N/A';
+
+        try {
+
+            const oi =
+                await exchange.fetchOpenInterest(
+                    symbol
+                );
+
+            if (
+                oi &&
+                Number.isFinite(
+                    oi.openInterestValue
+                )
+            ) {
+
+                oiStr =
+                    `$${(
+                        oi.openInterestValue /
+                        1000000
+                    ).toFixed(2)}M`;
+            }
+
+        } catch (error) {
+
+            console.error(
+                `OI error ${symbol}:`,
+                error.message
+            );
+        }
+
+        // ==================================================
+        // FUNDING RISK
+        // ==================================================
+
+        let fundingRisk =
+            'Normal';
+
+        if (
+            fundingRate !== null
+        ) {
+
+            if (
+                side === 'LONG' &&
+                fundingRate > 0.01
+            ) {
+
+                fundingRisk =
+                    '⚠️ High Long Funding';
+
+            } else if (
+                side === 'SHORT' &&
+                fundingRate < -0.01
+            ) {
+
+                fundingRisk =
+                    '⚠️ High Short Funding';
+
+            } else if (
+                side === 'LONG' &&
+                fundingRate < -0.01
+            ) {
+
+                fundingRisk =
+                    '🔥 Short-Squeeze Risk';
+
+            } else if (
+                side === 'SHORT' &&
+                fundingRate > 0.01
+            ) {
+
+                fundingRisk =
+                    '🔥 Long-Liquidation Risk';
+            }
+        }
+
+        // ==================================================
+        // SYMBOL
         // ==================================================
 
         const baseAsset =
-            symbol.split('/')[0];
+            symbol
+                .split('/')[0]
+                .replace(':USDT', '');
+
+        // ==================================================
+        // TRADINGVIEW
+        // ==================================================
+
+        const tradingViewSymbol =
+            `${baseAsset}USDT.P`;
 
         const tradingViewUrl =
-            `https://www.tradingview.com/chart/?symbol=BITGET:${baseAsset}USDT.P`;
+            `https://www.tradingview.com/chart/?symbol=BITGET:${tradingViewSymbol}`;
 
         // ==================================================
-        // ADX STATUS
+        // CROSS DISTANCE
         // ==================================================
 
-        let adxStatus = 'Normal';
-
-        if (
-            side.includes('LONG') &&
-            sellersExhausted
-        ) {
-
-            adxStatus =
-                '🔥 Sellers Exhausted';
-
-        } else if (
-            side.includes('SHORT') &&
-            buyersExhausted
-        ) {
-
-            adxStatus =
-                '🔥 Buyers Exhausted';
-
-        } else if (lastAdx >= 30) {
-
-            adxStatus =
-                '💪 Strong Trend';
-
-        } else if (lastAdx < 20) {
-
-            adxStatus =
-                '⚠️ Weak Trend';
-        }
+        const emaDistance =
+            (
+                (
+                    lastClose -
+                    lastEMA20
+                ) /
+                lastEMA20
+            ) * 100;
 
         // ==================================================
         // MESSAGE
         // ==================================================
 
         const message = `
-${emoji} *${side}*
+${emoji} *EMA20 ${side} CROSS*
 ━━━━━━━━━━━━━━━━━━━━
-
-🎯 *Confidence:* ${confidence}
-⭐ *Score:* ${score.toFixed(1)}
 
 🪙 *Coin:* #${baseAsset}
 ⏰ *Timeframe:* ${timeframe}
 
-💰 *Entry Price:* ${lastClose}
+━━━━━━━━━━━━━━━━━━━━
+🎯 *CONFIRMED CROSS*
+
+Previous Close:
+\`${previousClose}\`
+
+Previous EMA20:
+\`${previousEMA20.toPrecision(8)}\`
 
 ━━━━━━━━━━━━━━━━━━━━
-🧩 *REVERSAL CONFIRMATIONS*
 
-${setupMsg.map(x => '✅ ' + x).join('\n')}
+Latest Closed Candle:
+\`${lastClose}\`
+
+Latest EMA20:
+\`${lastEMA20.toPrecision(8)}\`
+
+EMA Distance:
+\`${emaDistance.toFixed(2)}%\`
+
+✅ *EMA20 Cross Confirmed*
+✅ *Candle CLOSED*
 
 ━━━━━━━━━━━━━━━━━━━━
-📊 *TECHNICALS*
+🕯️ *CANDLE*
 
-*RSI:* ${rsi7.toFixed(1)} → ${rsi6.toFixed(1)} → ${rsi5.toFixed(1)} → ${rsi4.toFixed(1)} → ${rsi3.toFixed(1)} → ${rsi2.toFixed(1)} → ${prevRsi.toFixed(1)} → ${lastRsi.toFixed(1)}
+*Open:* ${lastOpen}
+*High:* ${lastHigh}
+*Low:* ${lastLow}
+*Close:* ${lastClose}
 
-*RSI Current:* ${lastRsi.toFixed(1)}
+*Type:* ${candleType}
+*Body Strength:* ${candleStrength.toFixed(1)}%
 
-*RSI Direction:* ${
-    lastRsi > prevRsi
-        ? '⬆️ Rising'
-        : '⬇️ Falling'
-}
+━━━━━━━━━━━━━━━━━━━━
+📊 *VOLUME*
 
-*EMA 20:* ${lastEma20.toFixed(6)}
+*Status:* ${volumeStatus}
+*Current:* ${currentVolume.toFixed(0)}
+*Average:* ${averageVolume.toFixed(0)}
+*Ratio:* ${volumeRatio.toFixed(2)}x
 
-*VWAP:* ${lastVwap.toFixed(6)}
+━━━━━━━━━━━━━━━━━━━━
+📈 *EMA*
 
-*ADX:* ${lastAdx.toFixed(1)}
+*EMA20:* ${lastEMA20.toPrecision(8)}
 
-*ADX Status:* ${adxStatus}
-
-*Volume:* ${
-    volumeSpike
-        ? '🔥 SPIKE'
-        : volumeAboveAverage
-            ? 'Above Average'
-            : 'Normal'
-}
-
-*Pattern:* ${candlePattern}
+*Previous EMA20:*
+${previousEMA20.toPrecision(8)}
 
 ━━━━━━━━━━━━━━━━━━━━
 🏦 *DERIVATIVES*
@@ -1438,18 +957,18 @@ ${setupMsg.map(x => '✅ ' + x).join('\n')}
 
 *Funding:* ${fundingStr}
 
-*Risk:* ${liqData}
+*Risk:* ${fundingRisk}
 
 ━━━━━━━━━━━━━━━━━━━━
 🎯 *TRADE LEVELS*
 
 *Entry:* ${lastClose}
 
-*TP1:* ${tp1.toPrecision(6)}
+*TP1:* ${tp1.toPrecision(8)}
 
-*TP2:* ${tp2.toPrecision(6)}
+*TP2:* ${tp2.toPrecision(8)}
 
-*SL:* ${sl.toPrecision(6)}
+*SL:* ${sl.toPrecision(8)}
 
 *R:R TP1:* 1:${rr1.toFixed(2)}
 
@@ -1458,32 +977,26 @@ ${setupMsg.map(x => '✅ ' + x).join('\n')}
 ━━━━━━━━━━━━━━━━━━━━
 📌 *STRUCTURE*
 
-*Support:* ${support.toPrecision(6)}
+*Support:*
+${support.toPrecision(8)}
 
-*Resistance:* ${resistance.toPrecision(6)}
-
-*Bullish Sweep:* ${
-    isBullishSweep ? '✅' : '❌'
-}
-
-*Bearish Sweep:* ${
-    isBearishSweep ? '✅' : '❌'
-}
-
-*Bullish Divergence:* ${
-    bullishDivergence ? '✅' : '❌'
-}
-
-*Bearish Divergence:* ${
-    bearishDivergence ? '✅' : '❌'
-}
+*Resistance:*
+${resistance.toPrecision(8)}
 
 ━━━━━━━━━━━━━━━━━━━━
-⚠️ *Signal is based on closed candles.*
-Use proper position sizing and risk management.
+
+⚠️ Signal is generated only
+after the candle has CLOSED.
+
+Use proper position sizing
+and risk management.
 
 🔗 [Open TradingView Chart](${tradingViewUrl})
 `;
+
+        // ==================================================
+        // SEND TELEGRAM
+        // ==================================================
 
         await bot.sendMessage(
             chatId,
@@ -1495,7 +1008,7 @@ Use proper position sizing and risk management.
         );
 
         console.log(
-            `SIGNAL ${symbol} ${timeframe} ${side} Score=${score}`
+            `SIGNAL ${symbol} ${timeframe} ${side}`
         );
 
         return true;
@@ -1523,50 +1036,84 @@ async function run() {
     try {
 
         console.log(
-            'Starting Smart RSI Reversal Scanner...'
+            '========================================'
         );
 
-        const coins =
-            await getFilteredPairs();
+        console.log(
+            'SMART EMA20 CROSS SCANNER'
+        );
 
-        if (!coins.length) {
+        console.log(
+            '========================================'
+        );
+
+        // ==================================================
+        // GET ALL COINS
+        // ==================================================
+
+        const coins =
+            await getAllUSDTPerpetualCoins();
+
+        if (
+            !coins.length
+        ) {
 
             await bot.sendMessage(
                 chatId,
-                '⚠️ No coins found after filtering.'
+                '⚠️ No active USDT perpetual coins found.'
             );
 
             return;
         }
 
+        // ==================================================
+        // START MESSAGE
+        // ==================================================
+
         await bot.sendMessage(
             chatId,
-            `🔍 *Smart RSI Reversal Scanner Started*
+            `🔍 *EMA20 Cross Scanner Started*
 
-💰 Price Filter: < $${MAX_PRICE}
-📊 Volume: > $${MIN_QUOTE_VOLUME.toLocaleString()}
-🪙 Coins: ${coins.length}
-⏰ Timeframes: 4H / 1D / 1W
+🪙 Coins: *${coins.length}*
+⏰ Timeframes: *4H / 1D*
 
-🎯 RSI Bottom/Top Hook + Divergence + Liquidity + Volume + EMA + VWAP + ADX`,
+📈 LONG:
+Previous Close ≤ EMA20
+Latest Closed Close > EMA20
+
+📉 SHORT:
+Previous Close ≥ EMA20
+Latest Closed Close < EMA20
+
+✅ Only CLOSED candles
+🚫 No price filter
+🚫 No RSI filter
+🚫 No cheap-coin filter
+
+🎯 Scanning ALL eligible USDT perpetual contracts.`,
             {
                 parse_mode: 'Markdown'
             }
         );
 
-        let totalSignals = 0;
+        let totalSignals =
+            0;
 
         // ==================================================
         // TIMEFRAME FIRST
         // ==================================================
 
-        for (const timeframe of TIMEFRAMES) {
+        for (
+            const timeframe of TIMEFRAMES
+        ) {
 
             console.log(
-                `Scanning ${timeframe}...`
+                `\n========== ${timeframe} ==========`
             );
 
-            for (const coin of coins) {
+            for (
+                const coin of coins
+            ) {
 
                 const signalFound =
                     await analyzeCoin(
@@ -1574,38 +1121,52 @@ async function run() {
                         timeframe
                     );
 
-                if (signalFound) {
+                if (
+                    signalFound
+                ) {
 
                     totalSignals++;
                 }
 
-                // Small delay
-                await sleep(300);
+                await sleep(
+                    SCAN_DELAY
+                );
             }
         }
 
+        // ==================================================
+        // DURATION
+        // ==================================================
+
         const duration =
             (
-                (Date.now() - startTime) /
-                1000
+                (
+                    Date.now() -
+                    startTime
+                ) / 1000
             ).toFixed(1);
+
+        // ==================================================
+        // FINISHED MESSAGE
+        // ==================================================
 
         const statusMessage =
             totalSignals === 0
                 ? `✅ *Scan Finished*
 
-No valid RSI reversal setups found.
+No EMA20 cross signals found.
 
-🪙 Coins: ${coins.length}
-⏰ TF: 4H / 1D / 1W
-⏱️ Time: ${duration}s`
+🪙 Coins scanned: *${coins.length}*
+⏰ Timeframes: *4H / 1D*
+⏱️ Time: *${duration}s*`
+
                 : `✅ *Scan Finished*
 
 🎯 Signals Found: *${totalSignals}*
 
-🪙 Coins: ${coins.length}
-⏰ TF: 4H / 1D / 1W
-⏱️ Time: ${duration}s`;
+🪙 Coins scanned: *${coins.length}*
+⏰ Timeframes: *4H / 1D*
+⏱️ Time: *${duration}s*`;
 
         await bot.sendMessage(
             chatId,
@@ -1616,7 +1177,7 @@ No valid RSI reversal setups found.
         );
 
         console.log(
-            `Scan finished. Signals: ${totalSignals}`
+            `\nScan finished. Signals: ${totalSignals}`
         );
 
     } catch (error) {
