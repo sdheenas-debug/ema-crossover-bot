@@ -21,20 +21,10 @@ if (!token || !chatId) {
 const bot = new TelegramBot(token);
 
 // ======================================================
-// BINANCE USDⓈ-M FUTURES
-// USED ONLY FOR COIN LIST
+// BITGET ONLY
 // ======================================================
 
-const binance = new ccxt.binanceusdm({
-    enableRateLimit: true
-});
-
-// ======================================================
-// BITGET USDT PERPETUAL
-// USED ONLY FOR SIGNAL DATA
-// ======================================================
-
-const bitget = new ccxt.bitget({
+const exchange = new ccxt.bitget({
     options: {
         defaultType: 'swap'
     },
@@ -64,7 +54,6 @@ function signalKey(
     side,
     candleTimestamp
 ) {
-
     return `${symbol}_${side}_${candleTimestamp}`;
 }
 
@@ -73,14 +62,13 @@ function signalKey(
 // ======================================================
 
 function sleep(ms) {
-
     return new Promise(resolve => {
         setTimeout(resolve, ms);
     });
 }
 
 // ======================================================
-// EMA CALCULATION
+// EMA
 // ======================================================
 
 function calculateEMA(
@@ -92,7 +80,6 @@ function calculateEMA(
         !values ||
         values.length < period
     ) {
-
         return [];
     }
 
@@ -101,10 +88,7 @@ function calculateEMA(
 
     const ema = [];
 
-    // --------------------------------------------------
-    // INITIAL SMA
-    // --------------------------------------------------
-
+    // Initial SMA
     let sum = 0;
 
     for (
@@ -112,7 +96,6 @@ function calculateEMA(
         i < period;
         i++
     ) {
-
         sum += values[i];
     }
 
@@ -121,10 +104,7 @@ function calculateEMA(
 
     ema.push(previousEMA);
 
-    // --------------------------------------------------
-    // EMA
-    // --------------------------------------------------
-
+    // EMA calculation
     for (
         let i = period;
         i < values.length;
@@ -148,96 +128,84 @@ function calculateEMA(
 }
 
 // ======================================================
-// GET BINANCE USDⓈ-M FUTURES COINS
+// GET ALL BITGET USDT PERPETUALS
 // ======================================================
 
-async function getBinanceFuturesCoins() {
+async function getBitgetCoins() {
 
     try {
 
         console.log(
-            '======================================'
+            'Loading Bitget markets...'
         );
 
-        console.log(
-            'Loading Binance USDⓈ-M Futures...'
-        );
-
-        console.log(
-            '======================================'
-        );
-
-        await binance.loadMarkets();
+        await exchange.loadMarkets();
 
         const coins = [];
 
         for (
             const symbol of Object.keys(
-                binance.markets
+                exchange.markets
             )
         ) {
 
             try {
 
                 const market =
-                    binance.markets[symbol];
+                    exchange.markets[symbol];
 
                 if (!market) {
                     continue;
                 }
 
-                // ==================================================
-                // CONTRACT
-                // ==================================================
-
-                if (
-                    market.contract !== true
-                ) {
-
-                    continue;
-                }
-
-                // ==================================================
-                // LINEAR / USDT-M
-                // ==================================================
-
-                if (
-                    market.linear !== true
-                ) {
-
-                    continue;
-                }
-
-                // ==================================================
-                // SETTLEMENT USDT
-                // ==================================================
-
-                if (
-                    market.settle !== 'USDT'
-                ) {
-
-                    continue;
-                }
-
-                // ==================================================
-                // PERPETUAL
-                // ==================================================
+                // --------------------------------------------------
+                // PERPETUAL SWAP ONLY
+                // --------------------------------------------------
 
                 if (
                     market.swap !== true
                 ) {
-
                     continue;
                 }
 
-                // ==================================================
+                // --------------------------------------------------
+                // LINEAR CONTRACT
+                // --------------------------------------------------
+
+                if (
+                    market.linear !== true
+                ) {
+                    continue;
+                }
+
+                // --------------------------------------------------
+                // USDT QUOTE
+                // --------------------------------------------------
+
+                if (
+                    market.quote !== 'USDT'
+                ) {
+                    continue;
+                }
+
+                // --------------------------------------------------
+                // USDT SETTLEMENT
+                // --------------------------------------------------
+
+                if (
+                    market.settle &&
+                    market.settle !== 'USDT'
+                ) {
+                    continue;
+                }
+
+                // --------------------------------------------------
                 // ACTIVE
-                // ==================================================
+                // --------------------------------------------------
 
                 if (
                     market.active === false
                 ) {
-
                     continue;
                 }
 
@@ -246,7 +214,7 @@ async function getBinanceFuturesCoins() {
             } catch (error) {
 
                 console.error(
-                    `Binance filter error ${symbol}:`,
+                    `Market filter error ${symbol}:`,
                     error.message
                 );
             }
@@ -255,7 +223,7 @@ async function getBinanceFuturesCoins() {
         coins.sort();
 
         console.log(
-            `Binance USDⓈ-M USDT perpetuals: ${coins.length}`
+            `Bitget USDT perpetuals found: ${coins.length}`
         );
 
         return coins;
@@ -263,7 +231,7 @@ async function getBinanceFuturesCoins() {
     } catch (error) {
 
         console.error(
-            'Binance Futures error:',
+            'Bitget market error:',
             error.message
         );
 
@@ -272,133 +240,22 @@ async function getBinanceFuturesCoins() {
 }
 
 // ======================================================
-// FIND MATCHING BITGET USDT PERPETUAL
-// ======================================================
-
-function findBitgetSymbol(
-    binanceSymbol
-) {
-
-    /*
-     * Binance symbol examples:
-     *
-     * BTC/USDT:USDT
-     * ETH/USDT:USDT
-     * SOL/USDT:USDT
-     */
-
-    const base =
-        binanceSymbol
-            .split('/')[0];
-
-    // ==================================================
-    // SEARCH BITGET
-    // ==================================================
-
-    for (
-        const symbol of Object.keys(
-            bitget.markets
-        )
-    ) {
-
-        const market =
-            bitget.markets[symbol];
-
-        if (!market) {
-            continue;
-        }
-
-        // --------------------------------------------------
-        // PERPETUAL
-        // --------------------------------------------------
-
-        if (
-            market.swap !== true
-        ) {
-
-            continue;
-        }
-
-        // --------------------------------------------------
-        // LINEAR
-        // --------------------------------------------------
-
-        if (
-            market.linear !== true
-        ) {
-
-            continue;
-        }
-
-        // --------------------------------------------------
-        // SAME BASE
-        // --------------------------------------------------
-
-        if (
-            market.base !== base
-        ) {
-
-            continue;
-        }
-
-        // --------------------------------------------------
-        // USDT QUOTE
-        // --------------------------------------------------
-
-        if (
-            market.quote !== 'USDT'
-        ) {
-
-            continue;
-        }
-
-        // --------------------------------------------------
-        // USDT SETTLEMENT
-        // --------------------------------------------------
-
-        if (
-            market.settle &&
-            market.settle !== 'USDT'
-        ) {
-
-            continue;
-        }
-
-        // --------------------------------------------------
-        // ACTIVE
-        // --------------------------------------------------
-
-        if (
-            market.active === false
-        ) {
-
-            continue;
-        }
-
-        return market.symbol;
-    }
-
-    return null;
-}
-
-// ======================================================
 // ANALYZE COIN
 // ======================================================
 
 async function analyzeCoin(
-    binanceSymbol,
-    bitgetSymbol
+    symbol
 ) {
 
     try {
 
         // ==================================================
-        // FETCH BITGET 1D CANDLES
+        // FETCH 1D CANDLES
         // ==================================================
 
         const candles =
-            await bitget.fetchOHLCV(
-                bitgetSymbol,
+            await exchange.fetchOHLCV(
+                symbol,
                 TIMEFRAME,
                 undefined,
                 CANDLE_LIMIT
@@ -409,25 +266,23 @@ async function analyzeCoin(
             candles.length <
             EMA_PERIOD + 5
         ) {
-
             return false;
         }
 
         // ==================================================
-        // IMPORTANT
+        // CLOSED CANDLE INDEX
         // ==================================================
 
         /*
-         *
+         * Last candle:
          * candles[length - 1]
-         * = CURRENT FORMING CANDLE
+         * = current/forming candle
          *
+         * Last CLOSED:
          * candles[length - 2]
-         * = LAST COMPLETED CANDLE
          *
+         * Previous CLOSED:
          * candles[length - 3]
-         * = PREVIOUS COMPLETED CANDLE
-         *
          */
 
         const lastClosedIndex =
@@ -453,7 +308,7 @@ async function analyzeCoin(
             );
 
         // ==================================================
-        // VALIDATE DATA
+        // VALIDATE
         // ==================================================
 
         if (
@@ -462,7 +317,6 @@ async function analyzeCoin(
                     !Number.isFinite(price)
             )
         ) {
-
             return false;
         }
 
@@ -477,15 +331,10 @@ async function analyzeCoin(
             );
 
         if (
-            ema20.length === 0
+            !ema20.length
         ) {
-
             return false;
         }
-
-        // ==================================================
-        // EMA OFFSET
-        // ==================================================
 
         const emaOffset =
             EMA_PERIOD - 1;
@@ -502,7 +351,6 @@ async function analyzeCoin(
             lastEMAIndex < 0 ||
             previousEMAIndex < 0
         ) {
-
             return false;
         }
 
@@ -527,34 +375,8 @@ async function analyzeCoin(
             closes[previousClosedIndex];
 
         // ==================================================
-        // VALIDATE
-        // ==================================================
-
-        if (
-            !Number.isFinite(lastEMA20) ||
-            !Number.isFinite(previousEMA20) ||
-            !Number.isFinite(lastClose) ||
-            !Number.isFinite(previousClose)
-        ) {
-
-            return false;
-        }
-
-        // ==================================================
         // LONG CROSS
         // ==================================================
-
-        /*
-         *
-         * Previous CLOSED candle:
-         *
-         * Close <= EMA20
-         *
-         * Latest CLOSED candle:
-         *
-         * Close > EMA20
-         *
-         */
 
         const bullishCross =
             previousClose <=
@@ -566,18 +388,6 @@ async function analyzeCoin(
         // SHORT CROSS
         // ==================================================
 
-        /*
-         *
-         * Previous CLOSED candle:
-         *
-         * Close >= EMA20
-         *
-         * Latest CLOSED candle:
-         *
-         * Close < EMA20
-         *
-         */
-
         const bearishCross =
             previousClose >=
                 previousEMA20 &&
@@ -585,14 +395,13 @@ async function analyzeCoin(
                 lastEMA20;
 
         // ==================================================
-        // NO CROSS
+        // NO SIGNAL
         // ==================================================
 
         if (
             !bullishCross &&
             !bearishCross
         ) {
-
             return false;
         }
 
@@ -619,7 +428,7 @@ async function analyzeCoin(
 
         const key =
             signalKey(
-                binanceSymbol,
+                symbol,
                 side,
                 candleTimestamp
             );
@@ -627,16 +436,12 @@ async function analyzeCoin(
         if (
             sentSignals.has(key)
         ) {
-
             return false;
         }
 
         sentSignals.add(key);
 
-        // ==================================================
-        // MEMORY LIMIT
-        // ==================================================
-
+        // Keep memory manageable
         if (
             sentSignals.size > 5000
         ) {
@@ -647,17 +452,15 @@ async function analyzeCoin(
                     .next()
                     .value;
 
-            sentSignals.delete(
-                first
-            );
+            sentSignals.delete(first);
         }
 
         // ==================================================
-        // BASE ASSET
+        // BASE COIN
         // ==================================================
 
         const base =
-            binanceSymbol
+            symbol
                 .split('/')[0];
 
         // ==================================================
@@ -677,11 +480,9 @@ ${emoji} *20 EMA ${side} CROSS*
 
 🪙 *Coin:* #${base}
 
+🏦 *Exchange:* Bitget
+
 ⏰ *Timeframe:* 1D
-
-🔎 *Coin List:* Binance USDⓈ-M Futures
-
-📊 *Signal:* Bitget USDT Perpetual
 
 ━━━━━━━━━━━━━━━━━━━━
 📈 *PREVIOUS CLOSED CANDLE*
@@ -715,7 +516,6 @@ Latest Close < EMA20`
 
 ━━━━━━━━━━━━━━━━━━━━
 
-✅ Binance Futures Coin
 ✅ Bitget USDT Perpetual
 ✅ 1D Timeframe
 ✅ 20 EMA Cross
@@ -723,14 +523,14 @@ Latest Close < EMA20`
 
 ━━━━━━━━━━━━━━━━━━━━
 
-⚠️ Signal is based ONLY on
-the completed 1D candle.
+⚠️ Signal is generated only
+after the 1D candle has CLOSED.
 
 🔗 [Open Bitget Chart](${tradingViewUrl})
 `;
 
         // ==================================================
-        // SEND TELEGRAM
+        // TELEGRAM
         // ==================================================
 
         await bot.sendMessage(
@@ -742,28 +542,27 @@ the completed 1D candle.
             }
         );
 
+        console.log('');
         console.log(
-            `SIGNAL`
+            '=============================='
         );
-
         console.log(
-            `Binance : ${binanceSymbol}`
+            'SIGNAL'
         );
-
         console.log(
-            `Bitget  : ${bitgetSymbol}`
+            `Coin : ${symbol}`
         );
-
         console.log(
-            `Side    : ${side}`
+            `Side : ${side}`
         );
-
         console.log(
-            `Close   : ${lastClose}`
+            `Close: ${lastClose}`
         );
-
         console.log(
-            `EMA20   : ${lastEMA20}`
+            `EMA20: ${lastEMA20}`
+        );
+        console.log(
+            '=============================='
         );
 
         return true;
@@ -771,7 +570,7 @@ the completed 1D candle.
     } catch (error) {
 
         console.error(
-            `Analyze error ${binanceSymbol}:`,
+            `Analyze error ${symbol}:`,
             error.message
         );
 
@@ -795,7 +594,7 @@ async function run() {
             '=========================================='
         );
         console.log(
-            ' BINANCE FUTURES → BITGET EMA20 SCANNER'
+            '       BITGET 1D EMA20 SCANNER'
         );
         console.log(
             '=========================================='
@@ -803,91 +602,23 @@ async function run() {
         console.log('');
 
         // ==================================================
-        // LOAD BITGET MARKETS
+        // GET ALL BITGET COINS
         // ==================================================
 
-        console.log(
-            'Loading Bitget markets...'
-        );
-
-        await bitget.loadMarkets();
-
-        console.log(
-            `Bitget markets loaded: ${
-                Object.keys(
-                    bitget.markets
-                ).length
-            }`
-        );
-
-        // ==================================================
-        // GET BINANCE FUTURES COINS
-        // ==================================================
-
-        const binanceCoins =
-            await getBinanceFuturesCoins();
+        const coins =
+            await getBitgetCoins();
 
         if (
-            !binanceCoins.length
+            !coins.length
         ) {
-
-            console.error(
-                'No Binance USDⓈ-M Futures coins found.'
-            );
 
             await bot.sendMessage(
                 chatId,
-                '⚠️ No Binance USDⓈ-M Futures coins found.'
+                '⚠️ No active Bitget USDT perpetuals found.'
             );
 
             return;
         }
-
-        // ==================================================
-        // MATCH BINANCE → BITGET
-        // ==================================================
-
-        const pairs = [];
-
-        let noBitgetMatch = 0;
-
-        for (
-            const binanceSymbol
-            of binanceCoins
-        ) {
-
-            const bitgetSymbol =
-                findBitgetSymbol(
-                    binanceSymbol
-                );
-
-            if (
-                !bitgetSymbol
-            ) {
-
-                noBitgetMatch++;
-
-                continue;
-            }
-
-            pairs.push({
-                binanceSymbol,
-                bitgetSymbol
-            });
-        }
-
-        console.log('');
-        console.log(
-            `Binance Futures coins : ${binanceCoins.length}`
-        );
-
-        console.log(
-            `Bitget matching coins : ${pairs.length}`
-        );
-
-        console.log(
-            `No Bitget match       : ${noBitgetMatch}`
-        );
 
         // ==================================================
         // TELEGRAM START
@@ -895,27 +626,22 @@ async function run() {
 
         await bot.sendMessage(
             chatId,
-            `🔍 *EMA20 1D SCANNER STARTED*
+            `🔍 *BITGET EMA20 SCANNER STARTED*
 
-🔎 *Coin Source*
-Binance USDⓈ-M Futures
+🏦 Exchange:
+*Bitget*
 
-📊 *Signal Source*
-Bitget USDT Perpetual
+📊 Market:
+*USDT Perpetual*
 
-⏰ *Timeframe*
-1D
+⏰ Timeframe:
+*1D*
 
-📈 *Indicator*
-20 EMA
+📈 Indicator:
+*20 EMA*
 
-━━━━━━━━━━━━━━━━━━━━
-
-🪙 Binance Futures:
-*${binanceCoins.length}*
-
-🔗 Bitget Matching:
-*${pairs.length}*
+🪙 Coins:
+*${coins.length}*
 
 ━━━━━━━━━━━━━━━━━━━━
 
@@ -946,7 +672,7 @@ Only:
         );
 
         // ==================================================
-        // SCAN ALL MATCHING COINS
+        // SCAN
         // ==================================================
 
         let totalSignals =
@@ -956,25 +682,23 @@ Only:
             0;
 
         for (
-            const pair of pairs
+            const symbol of coins
         ) {
 
             scanned++;
 
             console.log(
-                `[${scanned}/${pairs.length}] ${pair.binanceSymbol}`
+                `[${scanned}/${coins.length}] ${symbol}`
             );
 
             const signalFound =
                 await analyzeCoin(
-                    pair.binanceSymbol,
-                    pair.bitgetSymbol
+                    symbol
                 );
 
             if (
                 signalFound
             ) {
-
                 totalSignals++;
             }
 
@@ -1001,15 +725,15 @@ Only:
 
         await bot.sendMessage(
             chatId,
-            `✅ *1D EMA20 SCAN FINISHED*
+            `✅ *BITGET 1D EMA20 SCAN FINISHED*
 
 ━━━━━━━━━━━━━━━━━━━━
 
-🔎 Binance Futures:
-*${binanceCoins.length}*
+🏦 Exchange:
+*Bitget*
 
-📊 Bitget Matching:
-*${pairs.length}*
+🪙 Coins Scanned:
+*${coins.length}*
 
 🎯 Signals:
 *${totalSignals}*
@@ -1020,6 +744,7 @@ Only:
 ━━━━━━━━━━━━━━━━━━━━
 
 📈 Method:
+
 *20 EMA Closed Candle Cross*`,
             {
                 parse_mode: 'Markdown'
@@ -1034,10 +759,13 @@ Only:
             'SCAN FINISHED'
         );
         console.log(
-            `Signals: ${totalSignals}`
+            `Coins   : ${coins.length}`
         );
         console.log(
-            `Time: ${duration}s`
+            `Signals : ${totalSignals}`
+        );
+        console.log(
+            `Time    : ${duration}s`
         );
         console.log(
             '=========================================='
