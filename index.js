@@ -15,10 +15,23 @@ if (!token || !chatId) {
 const bot = new TelegramBot(token);
 
 // ======================================================
-// EXCHANGE
+// BINANCE FUTURES
+// ONLY FOR COIN LIST
 // ======================================================
 
-const exchange = new ccxt.bitget({
+const binance = new ccxt.binance({
+    options: {
+        defaultType: 'future'
+    },
+    enableRateLimit: true
+});
+
+// ======================================================
+// BITGET FUTURES
+// ONLY FOR SIGNAL / CANDLES
+// ======================================================
+
+const bitget = new ccxt.bitget({
     options: {
         defaultType: 'swap'
     },
@@ -29,17 +42,13 @@ const exchange = new ccxt.bitget({
 // SETTINGS
 // ======================================================
 
-const TIMEFRAMES = ['4h', '1d'];
-
-const CANDLE_LIMIT = 100;
+const TIMEFRAME = '1d';
 
 const EMA_PERIOD = 20;
 
-// Scan ALL USDT perpetual coins.
-// No price filter.
-// No volume filter.
+const CANDLE_LIMIT = 100;
 
-const SCAN_DELAY = 250;
+const SCAN_DELAY = 150;
 
 // ======================================================
 // DUPLICATE PROTECTION
@@ -47,8 +56,12 @@ const SCAN_DELAY = 250;
 
 const sentSignals = new Set();
 
-function signalKey(symbol, timeframe, side, candleTimestamp) {
-    return `${symbol}_${timeframe}_${side}_${candleTimestamp}`;
+function signalKey(
+    symbol,
+    side,
+    candleTimestamp
+) {
+    return `${symbol}_${side}_${candleTimestamp}`;
 }
 
 // ======================================================
@@ -56,19 +69,9 @@ function signalKey(symbol, timeframe, side, candleTimestamp) {
 // ======================================================
 
 function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// ======================================================
-// SAFE NUMBER
-// ======================================================
-
-function safeNumber(value, fallback = 0) {
-    const number = Number(value);
-
-    return Number.isFinite(number)
-        ? number
-        : fallback;
+    return new Promise(resolve => {
+        setTimeout(resolve, ms);
+    });
 }
 
 // ======================================================
@@ -77,107 +80,126 @@ function safeNumber(value, fallback = 0) {
 
 function calculateEMA(values, period) {
 
-    if (!values || values.length < period) {
+    if (
+        !values ||
+        values.length < period
+    ) {
         return [];
     }
 
-    const multiplier = 2 / (period + 1);
+    const multiplier =
+        2 / (period + 1);
 
     const ema = [];
 
     // Initial SMA
     let sum = 0;
 
-    for (let i = 0; i < period; i++) {
+    for (
+        let i = 0;
+        i < period;
+        i++
+    ) {
         sum += values[i];
     }
 
-    let previousEMA = sum / period;
+    let previousEMA =
+        sum / period;
 
     ema.push(previousEMA);
 
-    // Remaining EMA values
-    for (let i = period; i < values.length; i++) {
+    // EMA
+    for (
+        let i = period;
+        i < values.length;
+        i++
+    ) {
 
         const currentEMA =
             (
-                values[i] - previousEMA
+                values[i] -
+                previousEMA
             ) * multiplier +
             previousEMA;
 
         ema.push(currentEMA);
 
-        previousEMA = currentEMA;
+        previousEMA =
+            currentEMA;
     }
 
     return ema;
 }
 
 // ======================================================
-// GET ALL USDT PERPETUAL COINS
+// GET BINANCE FUTURES COINS
 // ======================================================
 
-async function getAllUSDTPerpetualCoins() {
+async function getBinanceFuturesCoins() {
 
     try {
 
-        console.log('Loading Bitget markets...');
-
-        await exchange.loadMarkets();
-
-        const symbols = [];
-
-        for (const symbol of Object.keys(exchange.markets)) {
-
-            try {
-
-                const market =
-                    exchange.markets[symbol];
-
-                if (!market) continue;
-
-                // Only swap contracts
-                if (!market.swap) continue;
-
-                // Only linear USDT contracts
-                if (!market.linear) continue;
-
-                if (
-                    market.quote !== 'USDT'
-                ) {
-                    continue;
-                }
-
-                // Active markets only
-                if (
-                    market.active === false
-                ) {
-                    continue;
-                }
-
-                symbols.push(symbol);
-
-            } catch (error) {
-
-                console.error(
-                    `Market filter error ${symbol}:`,
-                    error.message
-                );
-            }
-        }
-
-        symbols.sort();
-
         console.log(
-            `Found ${symbols.length} USDT perpetual coins`
+            'Loading Binance Futures markets...'
         );
 
-        return symbols;
+        await binance.loadMarkets();
+
+        const coins = [];
+
+        for (
+            const symbol of Object.keys(
+                binance.markets
+            )
+        ) {
+
+            const market =
+                binance.markets[symbol];
+
+            if (!market) continue;
+
+            // Only Binance Futures
+            if (
+                market.future !== true
+            ) {
+                continue;
+            }
+
+            // Only USDT-M
+            if (
+                market.linear !== true
+            ) {
+                continue;
+            }
+
+            if (
+                market.quote !== 'USDT'
+            ) {
+                continue;
+            }
+
+            // Active only
+            if (
+                market.active === false
+            ) {
+                continue;
+            }
+
+            coins.push(symbol);
+        }
+
+        coins.sort();
+
+        console.log(
+            `Binance USDT-M Futures coins: ${coins.length}`
+        );
+
+        return coins;
 
     } catch (error) {
 
         console.error(
-            'Market loading error:',
+            'Binance market error:',
             error.message
         );
 
@@ -186,47 +208,133 @@ async function getAllUSDTPerpetualCoins() {
 }
 
 // ======================================================
+// FIND MATCHING BITGET USDT PERPETUAL
+// ======================================================
+
+function findBitgetSymbol(
+    binanceSymbol
+) {
+
+    const [base, quote] =
+        binanceSymbol.split('/');
+
+    // --------------------------------------------------
+    // Direct unified symbol
+    // --------------------------------------------------
+
+    const direct =
+        bitget.markets[
+            binanceSymbol
+        ];
+
+    if (
+        direct &&
+        direct.swap === true &&
+        direct.linear === true &&
+        direct.quote === 'USDT' &&
+        direct.active !== false
+    ) {
+
+        return direct.symbol;
+    }
+
+    // --------------------------------------------------
+    // Search Bitget markets
+    // --------------------------------------------------
+
+    for (
+        const symbol of Object.keys(
+            bitget.markets
+        )
+    ) {
+
+        const market =
+            bitget.markets[symbol];
+
+        if (!market) continue;
+
+        // USDT perpetual only
+        if (
+            market.swap !== true
+        ) {
+            continue;
+        }
+
+        if (
+            market.linear !== true
+        ) {
+            continue;
+        }
+
+        if (
+            market.base !== base
+        ) {
+            continue;
+        }
+
+        if (
+            market.quote !== quote
+        ) {
+            continue;
+        }
+
+        if (
+            market.active === false
+        ) {
+            continue;
+        }
+
+        return market.symbol;
+    }
+
+    return null;
+}
+
+// ======================================================
 // ANALYZE COIN
 // ======================================================
 
-async function analyzeCoin(symbol, timeframe) {
+async function analyzeCoin(
+    binanceSymbol,
+    bitgetSymbol
+) {
 
     try {
 
         // ==================================================
-        // FETCH OHLCV
+        // BITGET 1D CANDLES
         // ==================================================
 
         const candles =
-            await exchange.fetchOHLCV(
-                symbol,
-                timeframe,
+            await bitget.fetchOHLCV(
+                bitgetSymbol,
+                TIMEFRAME,
                 undefined,
                 CANDLE_LIMIT
             );
 
         if (
             !candles ||
-            candles.length < EMA_PERIOD + 5
+            candles.length <
+            EMA_PERIOD + 5
         ) {
             return false;
         }
 
         // ==================================================
-        // CLOSED CANDLES
+        // CLOSED CANDLE INDEX
         // ==================================================
 
         /*
+         * Last candle:
+         * candles[length - 1]
+         * = currently forming candle
          *
-         * candles[candles.length - 1]
-         * = current candle, normally still forming
+         * Last CLOSED:
+         * candles[length - 2]
          *
-         * candles[candles.length - 2]
-         * = LAST COMPLETED CANDLE
-         *
-         * candles[candles.length - 3]
-         * = PREVIOUS COMPLETED CANDLE
-         *
+         * Previous CLOSED:
+         * candles[length - 3]
          */
 
         const lastClosedIndex =
@@ -235,33 +343,21 @@ async function analyzeCoin(symbol, timeframe) {
         const previousClosedIndex =
             candles.length - 3;
 
-        if (
-            previousClosedIndex < EMA_PERIOD
-        ) {
-            return false;
-        }
-
         // ==================================================
-        // PRICE ARRAYS
+        // CLOSE PRICES
         // ==================================================
-
-        const timestamps =
-            candles.map(c => c[0]);
-
-        const opens =
-            candles.map(c => safeNumber(c[1]));
-
-        const highs =
-            candles.map(c => safeNumber(c[2]));
-
-        const lows =
-            candles.map(c => safeNumber(c[3]));
 
         const closes =
-            candles.map(c => safeNumber(c[4]));
+            candles.map(
+                candle =>
+                    Number(candle[4])
+            );
 
-        const volumes =
-            candles.map(c => safeNumber(c[5]));
+        const timestamps =
+            candles.map(
+                candle =>
+                    candle[0]
+            );
 
         // ==================================================
         // EMA20
@@ -273,32 +369,19 @@ async function analyzeCoin(symbol, timeframe) {
                 EMA_PERIOD
             );
 
-        /*
-         * EMA array starts from candle index:
-         *
-         * EMA_PERIOD - 1
-         *
-         * Example:
-         *
-         * candles:
-         * 0 1 2 ... 19 20 21
-         *
-         * EMA:
-         *             0  1  2
-         *
-         */
-
         const emaOffset =
             EMA_PERIOD - 1;
 
         const lastEMAIndex =
-            lastClosedIndex - emaOffset;
+            lastClosedIndex -
+            emaOffset;
 
         const previousEMAIndex =
-            previousClosedIndex - emaOffset;
+            previousClosedIndex -
+            emaOffset;
 
         if (
-            lastEMAIndex < 1 ||
+            lastEMAIndex < 0 ||
             previousEMAIndex < 0
         ) {
             return false;
@@ -311,17 +394,8 @@ async function analyzeCoin(symbol, timeframe) {
             ema20[previousEMAIndex];
 
         // ==================================================
-        // CLOSED CANDLE DATA
+        // CLOSED CANDLE CLOSE
         // ==================================================
-
-        const lastOpen =
-            opens[lastClosedIndex];
-
-        const lastHigh =
-            highs[lastClosedIndex];
-
-        const lastLow =
-            lows[lastClosedIndex];
 
         const lastClose =
             closes[lastClosedIndex];
@@ -329,39 +403,40 @@ async function analyzeCoin(symbol, timeframe) {
         const previousClose =
             closes[previousClosedIndex];
 
-        const previousOpen =
-            opens[previousClosedIndex];
-
         // ==================================================
-        // EMA CROSS
+        // EMA20 CROSS
         // ==================================================
 
-        /*
-         * LONG:
-         *
-         * Previous candle CLOSE <= previous EMA20
-         *
-         * Latest closed candle CLOSE > latest EMA20
-         */
+        // LONG:
+        //
+        // Previous candle close
+        // was below / equal EMA20
+        //
+        // Latest CLOSED candle close
+        // is above EMA20
 
         const bullishCross =
-            previousClose <= previousEMA20 &&
-            lastClose > lastEMA20;
+            previousClose <=
+                previousEMA20 &&
+            lastClose >
+                lastEMA20;
 
-        /*
-         * SHORT:
-         *
-         * Previous candle CLOSE >= previous EMA20
-         *
-         * Latest closed candle CLOSE < latest EMA20
-         */
+        // SHORT:
+        //
+        // Previous candle close
+        // was above / equal EMA20
+        //
+        // Latest CLOSED candle close
+        // is below EMA20
 
         const bearishCross =
-            previousClose >= previousEMA20 &&
-            lastClose < lastEMA20;
+            previousClose >=
+                previousEMA20 &&
+            lastClose <
+                lastEMA20;
 
         // ==================================================
-        // NO CROSS
+        // NO SIGNAL
         // ==================================================
 
         if (
@@ -375,328 +450,15 @@ async function analyzeCoin(symbol, timeframe) {
         // SIDE
         // ==================================================
 
-        let side;
-        let emoji;
-
-        if (bullishCross) {
-
-            side = 'LONG';
-            emoji = '🟢';
-
-        } else {
-
-            side = 'SHORT';
-            emoji = '🔴';
-        }
-
-        // ==================================================
-        // CANDLE TYPE
-        // ==================================================
-
-        const body =
-            Math.abs(
-                lastClose - lastOpen
-            );
-
-        const candleRange =
-            lastHigh - lastLow;
-
-        let candleType =
-            'Normal';
-
-        if (
-            lastClose > lastOpen
-        ) {
-
-            candleType =
-                '🟢 Bullish Candle';
-
-        } else if (
-            lastClose < lastOpen
-        ) {
-
-            candleType =
-                '🔴 Bearish Candle';
-
-        } else {
-
-            candleType =
-                '⚪ Doji';
-        }
-
-        // ==================================================
-        // CANDLE STRENGTH
-        // ==================================================
-
-        let candleStrength =
-            0;
-
-        if (candleRange > 0) {
-
-            candleStrength =
-                (
-                    body /
-                    candleRange
-                ) * 100;
-        }
-
-        // ==================================================
-        // VOLUME
-        // ==================================================
-
-        const volumeLookback = 20;
-
-        const volumeStart =
-            Math.max(
-                0,
-                lastClosedIndex -
-                volumeLookback
-            );
-
-        const volumeHistory =
-            volumes.slice(
-                volumeStart,
-                lastClosedIndex
-            );
-
-        let averageVolume = 0;
-
-        if (
-            volumeHistory.length
-        ) {
-
-            averageVolume =
-                volumeHistory.reduce(
-                    (sum, value) =>
-                        sum + value,
-                    0
-                ) /
-                volumeHistory.length;
-        }
-
-        const currentVolume =
-            volumes[lastClosedIndex];
-
-        const volumeRatio =
-            averageVolume > 0
-                ? currentVolume /
-                  averageVolume
-                : 0;
-
-        let volumeStatus =
-            'Normal';
-
-        if (
-            volumeRatio >= 2
-        ) {
-
-            volumeStatus =
-                '🔥 Strong Volume';
-
-        } else if (
-            volumeRatio >= 1.3
-        ) {
-
-            volumeStatus =
-                '📈 Above Average';
-
-        } else if (
-            volumeRatio < 0.7
-        ) {
-
-            volumeStatus =
-                '⚠️ Low Volume';
-        }
-
-        // ==================================================
-        // ATR
-        // ==================================================
-
-        const atrPeriod = 14;
-
-        let atr = 0;
-
-        if (
-            candles.length >
-            atrPeriod + 2
-        ) {
-
-            const trueRanges = [];
-
-            for (
-                let i = 1;
-                i < candles.length;
-                i++
-            ) {
-
-                const high =
-                    highs[i];
-
-                const low =
-                    lows[i];
-
-                const previousClosePrice =
-                    closes[i - 1];
-
-                const tr =
-                    Math.max(
-                        high - low,
-                        Math.abs(
-                            high -
-                            previousClosePrice
-                        ),
-                        Math.abs(
-                            low -
-                            previousClosePrice
-                        )
-                    );
-
-                trueRanges.push(tr);
-            }
-
-            const atrValues =
-                trueRanges.slice(
-                    -atrPeriod
-                );
-
-            if (
-                atrValues.length
-            ) {
-
-                atr =
-                    atrValues.reduce(
-                        (sum, value) =>
-                            sum + value,
-                        0
-                    ) /
-                    atrValues.length;
-            }
-        }
-
-        // ==================================================
-        // SUPPORT / RESISTANCE
-        // ==================================================
-
-        const structureLookback = 10;
-
-        const structureStart =
-            Math.max(
-                0,
-                lastClosedIndex -
-                structureLookback
-            );
-
-        const structureLows =
-            lows.slice(
-                structureStart,
-                lastClosedIndex
-            );
-
-        const structureHighs =
-            highs.slice(
-                structureStart,
-                lastClosedIndex
-            );
-
-        const support =
-            structureLows.length
-                ? Math.min(
-                    ...structureLows
-                )
-                : lastLow;
-
-        const resistance =
-            structureHighs.length
-                ? Math.max(
-                    ...structureHighs
-                )
-                : lastHigh;
-
-        // ==================================================
-        // SL / TP
-        // ==================================================
-
-        let sl;
-        let tp1;
-        let tp2;
-
-        /*
-         * ATR based levels.
-         *
-         * If ATR cannot be calculated,
-         * use percentage fallback.
-         */
-
-        const usableATR =
-            atr > 0
-                ? atr
-                : lastClose * 0.02;
-
-        if (
-            side === 'LONG'
-        ) {
-
-            sl =
-                Math.min(
-                    lastLow,
-                    support
-                ) -
-                usableATR * 0.5;
-
-            tp1 =
-                lastClose +
-                usableATR * 2;
-
-            tp2 =
-                lastClose +
-                usableATR * 3.5;
-
-        } else {
-
-            sl =
-                Math.max(
-                    lastHigh,
-                    resistance
-                ) +
-                usableATR * 0.5;
-
-            tp1 =
-                lastClose -
-                usableATR * 2;
-
-            tp2 =
-                lastClose -
-                usableATR * 3.5;
-        }
-
-        // ==================================================
-        // RISK / REWARD
-        // ==================================================
-
-        const risk =
-            Math.abs(
-                lastClose - sl
-            );
-
-        const reward1 =
-            Math.abs(
-                tp1 - lastClose
-            );
-
-        const reward2 =
-            Math.abs(
-                tp2 - lastClose
-            );
-
-        const rr1 =
-            risk > 0
-                ? reward1 / risk
-                : 0;
-
-        const rr2 =
-            risk > 0
-                ? reward2 / risk
-                : 0;
+        const side =
+            bullishCross
+                ? 'LONG'
+                : 'SHORT';
+
+        const emoji =
+            bullishCross
+                ? '🟢'
+                : '🔴';
 
         // ==================================================
         // DUPLICATE PROTECTION
@@ -707,8 +469,7 @@ async function analyzeCoin(symbol, timeframe) {
 
         const key =
             signalKey(
-                symbol,
-                timeframe,
+                binanceSymbol,
                 side,
                 candleTimestamp
             );
@@ -721,7 +482,7 @@ async function analyzeCoin(symbol, timeframe) {
 
         sentSignals.add(key);
 
-        // Keep memory manageable
+        // Keep memory small
         if (
             sentSignals.size > 5000
         ) {
@@ -736,262 +497,79 @@ async function analyzeCoin(symbol, timeframe) {
         }
 
         // ==================================================
-        // FUNDING
+        // BASE COIN
         // ==================================================
 
-        let fundingStr =
-            'N/A';
-
-        let fundingRate =
-            null;
-
-        try {
-
-            const funding =
-                await exchange.fetchFundingRate(
-                    symbol
-                );
-
-            if (
-                funding &&
-                Number.isFinite(
-                    funding.fundingRate
-                )
-            ) {
-
-                fundingRate =
-                    funding.fundingRate;
-
-                fundingStr =
-                    `${(
-                        fundingRate * 100
-                    ).toFixed(4)}%`;
-            }
-
-        } catch (error) {
-
-            console.error(
-                `Funding error ${symbol}:`,
-                error.message
-            );
-        }
-
-        // ==================================================
-        // OPEN INTEREST
-        // ==================================================
-
-        let oiStr =
-            'N/A';
-
-        try {
-
-            const oi =
-                await exchange.fetchOpenInterest(
-                    symbol
-                );
-
-            if (
-                oi &&
-                Number.isFinite(
-                    oi.openInterestValue
-                )
-            ) {
-
-                oiStr =
-                    `$${(
-                        oi.openInterestValue /
-                        1000000
-                    ).toFixed(2)}M`;
-            }
-
-        } catch (error) {
-
-            console.error(
-                `OI error ${symbol}:`,
-                error.message
-            );
-        }
-
-        // ==================================================
-        // FUNDING RISK
-        // ==================================================
-
-        let fundingRisk =
-            'Normal';
-
-        if (
-            fundingRate !== null
-        ) {
-
-            if (
-                side === 'LONG' &&
-                fundingRate > 0.01
-            ) {
-
-                fundingRisk =
-                    '⚠️ High Long Funding';
-
-            } else if (
-                side === 'SHORT' &&
-                fundingRate < -0.01
-            ) {
-
-                fundingRisk =
-                    '⚠️ High Short Funding';
-
-            } else if (
-                side === 'LONG' &&
-                fundingRate < -0.01
-            ) {
-
-                fundingRisk =
-                    '🔥 Short-Squeeze Risk';
-
-            } else if (
-                side === 'SHORT' &&
-                fundingRate > 0.01
-            ) {
-
-                fundingRisk =
-                    '🔥 Long-Liquidation Risk';
-            }
-        }
-
-        // ==================================================
-        // SYMBOL
-        // ==================================================
-
-        const baseAsset =
-            symbol
-                .split('/')[0]
-                .replace(':USDT', '');
+        const base =
+            binanceSymbol
+                .split('/')[0];
 
         // ==================================================
         // TRADINGVIEW
         // ==================================================
 
-        const tradingViewSymbol =
-            `${baseAsset}USDT.P`;
-
         const tradingViewUrl =
-            `https://www.tradingview.com/chart/?symbol=BITGET:${tradingViewSymbol}`;
+            `https://www.tradingview.com/chart/?symbol=BITGET:${base}USDT.P`;
 
         // ==================================================
-        // CROSS DISTANCE
-        // ==================================================
-
-        const emaDistance =
-            (
-                (
-                    lastClose -
-                    lastEMA20
-                ) /
-                lastEMA20
-            ) * 100;
-
-        // ==================================================
-        // MESSAGE
+        // TELEGRAM MESSAGE
         // ==================================================
 
         const message = `
-${emoji} *EMA20 ${side} CROSS*
+${emoji} *20 EMA ${side} CROSS*
 ━━━━━━━━━━━━━━━━━━━━
 
-🪙 *Coin:* #${baseAsset}
-⏰ *Timeframe:* ${timeframe}
+🪙 *Coin:* #${base}
+
+⏰ *Timeframe:* 1D
+
+🔎 *Coin List:* Binance USDT-M Futures
+
+📊 *Signal:* Bitget USDT Perpetual
 
 ━━━━━━━━━━━━━━━━━━━━
-🎯 *CONFIRMED CROSS*
+📈 *PREVIOUS CLOSED CANDLE*
 
-Previous Close:
-\`${previousClose}\`
+*Close:*
+${previousClose}
 
-Previous EMA20:
-\`${previousEMA20.toPrecision(8)}\`
+*EMA20:*
+${previousEMA20.toPrecision(10)}
+
+━━━━━━━━━━━━━━━━━━━━
+📈 *LATEST CLOSED CANDLE*
+
+*Close:*
+${lastClose}
+
+*EMA20:*
+${lastEMA20.toPrecision(10)}
 
 ━━━━━━━━━━━━━━━━━━━━
 
-Latest Closed Candle:
-\`${lastClose}\`
+${emoji} *20 EMA CROSS CONFIRMED*
 
-Latest EMA20:
-\`${lastEMA20.toPrecision(8)}\`
-
-EMA Distance:
-\`${emaDistance.toFixed(2)}%\`
-
-✅ *EMA20 Cross Confirmed*
-✅ *Candle CLOSED*
+${side === 'LONG'
+    ? `Previous Close ≤ EMA20
+Latest Close > EMA20`
+    : `Previous Close ≥ EMA20
+Latest Close < EMA20`
+}
 
 ━━━━━━━━━━━━━━━━━━━━
-🕯️ *CANDLE*
 
-*Open:* ${lastOpen}
-*High:* ${lastHigh}
-*Low:* ${lastLow}
-*Close:* ${lastClose}
-
-*Type:* ${candleType}
-*Body Strength:* ${candleStrength.toFixed(1)}%
-
-━━━━━━━━━━━━━━━━━━━━
-📊 *VOLUME*
-
-*Status:* ${volumeStatus}
-*Current:* ${currentVolume.toFixed(0)}
-*Average:* ${averageVolume.toFixed(0)}
-*Ratio:* ${volumeRatio.toFixed(2)}x
-
-━━━━━━━━━━━━━━━━━━━━
-📈 *EMA*
-
-*EMA20:* ${lastEMA20.toPrecision(8)}
-
-*Previous EMA20:*
-${previousEMA20.toPrecision(8)}
-
-━━━━━━━━━━━━━━━━━━━━
-🏦 *DERIVATIVES*
-
-*Open Interest:* ${oiStr}
-
-*Funding:* ${fundingStr}
-
-*Risk:* ${fundingRisk}
-
-━━━━━━━━━━━━━━━━━━━━
-🎯 *TRADE LEVELS*
-
-*Entry:* ${lastClose}
-
-*TP1:* ${tp1.toPrecision(8)}
-
-*TP2:* ${tp2.toPrecision(8)}
-
-*SL:* ${sl.toPrecision(8)}
-
-*R:R TP1:* 1:${rr1.toFixed(2)}
-
-*R:R TP2:* 1:${rr2.toFixed(2)}
-
-━━━━━━━━━━━━━━━━━━━━
-📌 *STRUCTURE*
-
-*Support:*
-${support.toPrecision(8)}
-
-*Resistance:*
-${resistance.toPrecision(8)}
+✅ Binance Futures Coin
+✅ Bitget Perpetual
+✅ 1D Timeframe
+✅ 20 EMA Cross
+✅ Candle CLOSED
 
 ━━━━━━━━━━━━━━━━━━━━
 
 ⚠️ Signal is generated only
-after the candle has CLOSED.
+after the 1D candle has CLOSED.
 
-Use proper position sizing
-and risk management.
-
-🔗 [Open TradingView Chart](${tradingViewUrl})
+🔗 [Open Bitget Chart](${tradingViewUrl})
 `;
 
         // ==================================================
@@ -1008,7 +586,7 @@ and risk management.
         );
 
         console.log(
-            `SIGNAL ${symbol} ${timeframe} ${side}`
+            `SIGNAL | ${binanceSymbol} | ${bitgetSymbol} | ${side}`
         );
 
         return true;
@@ -1016,7 +594,7 @@ and risk management.
     } catch (error) {
 
         console.error(
-            `Analyze error ${symbol} ${timeframe}:`,
+            `Analyze error ${binanceSymbol}:`,
             error.message
         );
 
@@ -1025,7 +603,7 @@ and risk management.
 }
 
 // ======================================================
-// MAIN SCANNER
+// MAIN
 // ======================================================
 
 async function run() {
@@ -1036,35 +614,73 @@ async function run() {
     try {
 
         console.log(
-            '========================================'
+            '=========================================='
         );
 
         console.log(
-            'SMART EMA20 CROSS SCANNER'
+            'BINANCE FUTURES → BITGET EMA20 SCANNER'
         );
 
         console.log(
-            '========================================'
+            '=========================================='
         );
 
         // ==================================================
-        // GET ALL COINS
+        // LOAD BITGET
         // ==================================================
 
-        const coins =
-            await getAllUSDTPerpetualCoins();
+        await bitget.loadMarkets();
+
+        // ==================================================
+        // GET BINANCE FUTURES COINS
+        // ==================================================
+
+        const binanceCoins =
+            await getBinanceFuturesCoins();
 
         if (
-            !coins.length
+            !binanceCoins.length
         ) {
 
             await bot.sendMessage(
                 chatId,
-                '⚠️ No active USDT perpetual coins found.'
+                '⚠️ No Binance USDT-M Futures coins found.'
             );
 
             return;
         }
+
+        // ==================================================
+        // MATCH WITH BITGET
+        // ==================================================
+
+        const pairs = [];
+
+        for (
+            const binanceSymbol
+            of binanceCoins
+        ) {
+
+            const bitgetSymbol =
+                findBitgetSymbol(
+                    binanceSymbol
+                );
+
+            if (
+                !bitgetSymbol
+            ) {
+                continue;
+            }
+
+            pairs.push({
+                binanceSymbol,
+                bitgetSymbol
+            });
+        }
+
+        console.log(
+            `Bitget matching perpetuals: ${pairs.length}`
+        );
 
         // ==================================================
         // START MESSAGE
@@ -1072,70 +688,74 @@ async function run() {
 
         await bot.sendMessage(
             chatId,
-            `🔍 *EMA20 Cross Scanner Started*
+            `🔍 *EMA20 1D SCANNER STARTED*
 
-🪙 Coins: *${coins.length}*
-⏰ Timeframes: *4H / 1D*
+🔎 *Coin Source:*
+Binance USDT-M Futures
 
-📈 LONG:
+📊 *Signal Source:*
+Bitget USDT Perpetual
+
+⏰ *Timeframe:*
+1D
+
+📈 *Indicator:*
+20 EMA
+
+🪙 Binance Futures:
+*${binanceCoins.length}*
+
+🔗 Bitget Matching:
+*${pairs.length}*
+
+━━━━━━━━━━━━━━━━━━━━
+
+🟢 LONG:
 Previous Close ≤ EMA20
 Latest Closed Close > EMA20
 
-📉 SHORT:
+🔴 SHORT:
 Previous Close ≥ EMA20
 Latest Closed Close < EMA20
 
-✅ Only CLOSED candles
-🚫 No price filter
-🚫 No RSI filter
-🚫 No cheap-coin filter
+━━━━━━━━━━━━━━━━━━━━
 
-🎯 Scanning ALL eligible USDT perpetual contracts.`,
+Only 20 EMA cross.
+No other indicators.`,
             {
                 parse_mode: 'Markdown'
             }
         );
 
-        let totalSignals =
-            0;
+        // ==================================================
+        // SCAN ALL
+        // ==================================================
 
-        // ==================================================
-        // TIMEFRAME FIRST
-        // ==================================================
+        let totalSignals = 0;
 
         for (
-            const timeframe of TIMEFRAMES
+            const pair of pairs
         ) {
 
-            console.log(
-                `\n========== ${timeframe} ==========`
-            );
-
-            for (
-                const coin of coins
-            ) {
-
-                const signalFound =
-                    await analyzeCoin(
-                        coin,
-                        timeframe
-                    );
-
-                if (
-                    signalFound
-                ) {
-
-                    totalSignals++;
-                }
-
-                await sleep(
-                    SCAN_DELAY
+            const signalFound =
+                await analyzeCoin(
+                    pair.binanceSymbol,
+                    pair.bitgetSymbol
                 );
+
+            if (
+                signalFound
+            ) {
+                totalSignals++;
             }
+
+            await sleep(
+                SCAN_DELAY
+            );
         }
 
         // ==================================================
-        // DURATION
+        // FINISH
         // ==================================================
 
         const duration =
@@ -1146,38 +766,28 @@ Latest Closed Close < EMA20
                 ) / 1000
             ).toFixed(1);
 
-        // ==================================================
-        // FINISHED MESSAGE
-        // ==================================================
-
-        const statusMessage =
-            totalSignals === 0
-                ? `✅ *Scan Finished*
-
-No EMA20 cross signals found.
-
-🪙 Coins scanned: *${coins.length}*
-⏰ Timeframes: *4H / 1D*
-⏱️ Time: *${duration}s*`
-
-                : `✅ *Scan Finished*
-
-🎯 Signals Found: *${totalSignals}*
-
-🪙 Coins scanned: *${coins.length}*
-⏰ Timeframes: *4H / 1D*
-⏱️ Time: *${duration}s*`;
-
         await bot.sendMessage(
             chatId,
-            statusMessage,
+            `✅ *1D EMA20 SCAN FINISHED*
+
+🔎 Binance Futures:
+*${binanceCoins.length}*
+
+📊 Bitget Matching:
+*${pairs.length}*
+
+🎯 Signals:
+*${totalSignals}*
+
+⏱️ Scan Time:
+*${duration}s*`,
             {
                 parse_mode: 'Markdown'
             }
         );
 
         console.log(
-            `\nScan finished. Signals: ${totalSignals}`
+            `Scan finished. Signals: ${totalSignals}`
         );
 
     } catch (error) {
