@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 // ======================================================
-// ENV
+// ENVIRONMENT
 // ======================================================
 
 const token = process.env.TELEGRAM_TOKEN;
@@ -22,7 +22,7 @@ if (!token || !chatId) {
 const bot = new TelegramBot(token);
 
 // ======================================================
-// BITGET
+// BITGET EXCHANGE
 // ======================================================
 
 const exchange = new ccxt.bitget({
@@ -53,32 +53,60 @@ const CANDLE_LIMIT = 300;
 
 const SCAN_DELAY = 150;
 
-const STATE_DIR = '.signal-state';
-const STATE_FILE = path.join(STATE_DIR, 'sent-signals.json');
+// ======================================================
+// SIGNAL HISTORY
+// ======================================================
 
-// ======================================================
-// DUPLICATE PROTECTION - PERSISTENT
-// ======================================================
+const STATE_DIR = '.signal-state';
+
+const STATE_FILE = path.join(
+    STATE_DIR,
+    'sent-signals.json'
+);
 
 let sentSignals = new Set();
 
+// ======================================================
+// LOAD PREVIOUS SIGNALS
+// ======================================================
+
 async function loadSignalHistory() {
+
     try {
-        const data = await fs.readFile(STATE_FILE, 'utf8');
+
+        const data = await fs.readFile(
+            STATE_FILE,
+            'utf8'
+        );
+
         const saved = JSON.parse(data);
 
         sentSignals = new Set(saved);
 
-        console.log(`Previous signals loaded: ${sentSignals.size}`);
+        console.log(
+            `Previous signals loaded: ${sentSignals.size}`
+        );
 
     } catch {
+
         sentSignals = new Set();
-        console.log('No previous signal history found.');
+
+        console.log(
+            'No previous signal history found.'
+        );
     }
 }
 
+// ======================================================
+// SAVE SIGNAL HISTORY
+// ======================================================
+
 async function saveSignalHistory() {
-    await fs.mkdir(STATE_DIR, { recursive: true });
+
+    await fs.mkdir(
+        STATE_DIR,
+        { recursive: true }
+    );
 
     await fs.writeFile(
         STATE_FILE,
@@ -87,7 +115,16 @@ async function saveSignalHistory() {
     );
 }
 
-function signalKey(symbol, side, candleTimestamp) {
+// ======================================================
+// DUPLICATE PROTECTION
+// ======================================================
+
+function signalKey(
+    symbol,
+    side,
+    candleTimestamp
+) {
+
     return `${symbol}_${side}_${candleTimestamp}`;
 }
 
@@ -96,7 +133,10 @@ function signalKey(symbol, side, candleTimestamp) {
 // ======================================================
 
 function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+
+    return new Promise(resolve => {
+        setTimeout(resolve, ms);
+    });
 }
 
 // ======================================================
@@ -104,15 +144,26 @@ function sleep(ms) {
 // ======================================================
 
 function cosh(x) {
-    return (Math.exp(x) + Math.exp(-x)) / 2;
+
+    return (
+        Math.exp(x) +
+        Math.exp(-x)
+    ) / 2;
 }
 
 function sinh(x) {
-    return (Math.exp(x) - Math.exp(-x)) / 2;
+
+    return (
+        Math.exp(x) -
+        Math.exp(-x)
+    ) / 2;
 }
 
 function acosh(x) {
-    if (x < 1) return NaN;
+
+    if (x < 1) {
+        return NaN;
+    }
 
     return Math.log(
         x + Math.sqrt(x * x - 1)
@@ -120,6 +171,7 @@ function acosh(x) {
 }
 
 function asinh(x) {
+
     return Math.log(
         x + Math.sqrt(x * x + 1)
     );
@@ -130,7 +182,12 @@ function calculateChebyshevI(
     length,
     ripple = 0.5
 ) {
-    if (!values || !values.length || length <= 0) {
+
+    if (
+        !values ||
+        !values.length ||
+        length <= 0
+    ) {
         return [];
     }
 
@@ -144,7 +201,8 @@ function calculateChebyshevI(
         asinh(1 / ripple)
     );
 
-    const g = (a - b) / (a + b);
+    const g =
+        (a - b) / (a + b);
 
     const output = [];
 
@@ -165,8 +223,7 @@ function calculateChebyshevI(
 }
 
 // ======================================================
-// RSI PRIMED [CHARTPRIME]
-// RSI CANDLE CALCULATION
+// RSI PRIMED CHARTPRIME CALCULATION
 // ======================================================
 
 function calculateRSIPrimed(
@@ -174,14 +231,16 @@ function calculateRSIPrimed(
     length = RSI_LENGTH,
     smoothing = RSI_SMOOTHING
 ) {
+
     if (
         !source ||
-        source.length < length + smoothing + 5
+        source.length <
+        length + smoothing + 5
     ) {
         return [];
     }
 
-    // Filter source
+    // STEP 1: Smooth source
 
     const filteredSource =
         calculateChebyshevI(
@@ -190,28 +249,38 @@ function calculateRSIPrimed(
             RSI_RIPPLE
         );
 
-    // Price changes
+    // STEP 2: Price changes
 
-    const changes = filteredSource.map(
-        (value, index) => {
+    const changes =
+        filteredSource.map(
+            (value, index) => {
 
-            if (index === 0) return 0;
+                if (index === 0) {
+                    return 0;
+                }
 
-            return value - filteredSource[index - 1];
-        }
-    );
+                return (
+                    value -
+                    filteredSource[index - 1]
+                );
+            }
+        );
 
-    // Positive and negative changes
+    // STEP 3: Gains
 
-    const gains = changes.map(
-        value => Math.max(value, 0)
-    );
+    const gains =
+        changes.map(
+            value => Math.max(value, 0)
+        );
 
-    const losses = changes.map(
-        value => Math.max(-value, 0)
-    );
+    // STEP 4: Losses
 
-    // Filter gains and losses
+    const losses =
+        changes.map(
+            value => Math.max(-value, 0)
+        );
+
+    // STEP 5: Filter gains
 
     const filteredGains =
         calculateChebyshevI(
@@ -220,6 +289,8 @@ function calculateRSIPrimed(
             RSI_RIPPLE
         );
 
+    // STEP 6: Filter losses
+
     const filteredLosses =
         calculateChebyshevI(
             losses,
@@ -227,23 +298,34 @@ function calculateRSIPrimed(
             RSI_RIPPLE
         );
 
-    // RSI values
+    // STEP 7: RSI
 
     const rsi = [];
 
-    for (let i = 0; i < source.length; i++) {
+    for (
+        let i = 0;
+        i < source.length;
+        i++
+    ) {
 
         const up = filteredGains[i];
+
         const down = filteredLosses[i];
 
         let value;
 
         if (down === 0) {
+
             value = 100;
+
         } else {
-            value = 100 - (
-                100 / (1 + up / down)
-            );
+
+            value =
+                100 -
+                (
+                    100 /
+                    (1 + up / down)
+                );
         }
 
         rsi.push(value);
@@ -254,14 +336,16 @@ function calculateRSIPrimed(
 
 // ======================================================
 // GET TOP 100 BITGET USDT PERPETUAL COINS
-// RANKING: 24H QUOTE VOLUME
+// SORT BY 24H QUOTE VOLUME
 // ======================================================
 
 async function getBitgetCoins() {
 
     try {
 
-        console.log('Loading Bitget markets...');
+        console.log(
+            'Loading Bitget markets...'
+        );
 
         await exchange.loadMarkets();
 
@@ -287,29 +371,74 @@ async function getBitgetCoins() {
 
         const coins = [];
 
-        for (const symbol of Object.keys(exchange.markets)) {
+        for (
+            const symbol of Object.keys(
+                exchange.markets
+            )
+        ) {
 
-            const market = exchange.markets[symbol];
+            const market =
+                exchange.markets[symbol];
 
             if (!market) continue;
 
-            if (market.swap !== true) continue;
+            // Perpetual only
 
-            if (market.linear !== true) continue;
+            if (market.swap !== true) {
+                continue;
+            }
 
-            if (market.quote !== 'USDT') continue;
+            // Linear contract only
 
-            if (market.settle !== 'USDT') continue;
+            if (market.linear !== true) {
+                continue;
+            }
 
-            if (market.active === false) continue;
+            // USDT quote
 
-            if (stableCoins.has(market.base)) continue;
+            if (market.quote !== 'USDT') {
+                continue;
+            }
+
+            // USDT settlement
+
+            if (market.settle !== 'USDT') {
+                continue;
+            }
+
+            // Active market
+
+            if (market.active === false) {
+                continue;
+            }
+
+            // Exclude stablecoins
+
+            if (stableCoins.has(market.base)) {
+                continue;
+            }
 
             const ticker = tickers[symbol];
 
             if (!ticker) continue;
 
-            const volume = Number(ticker.quoteVolume);
+            let volume =
+                Number(ticker.quoteVolume);
+
+            if (
+                !Number.isFinite(volume) ||
+                volume <= 0
+            ) {
+
+                const baseVolume =
+                    Number(ticker.baseVolume);
+
+                const lastPrice =
+                    Number(ticker.last);
+
+                volume =
+                    baseVolume * lastPrice;
+            }
 
             if (
                 !Number.isFinite(volume) ||
@@ -325,7 +454,7 @@ async function getBitgetCoins() {
             });
         }
 
-        // Highest volume first
+        // Highest 24H volume first
 
         coins.sort(
             (a, b) => b.volume - a.volume
@@ -347,7 +476,7 @@ async function getBitgetCoins() {
     } catch (error) {
 
         console.error(
-            'Market loading error:',
+            'Market error:',
             error.message
         );
 
@@ -356,7 +485,7 @@ async function getBitgetCoins() {
 }
 
 // ======================================================
-// TELEGRAM - SEND ALL SCANNED COINS
+// TELEGRAM - SCANNED COINS LIST
 // 25 COINS PER MESSAGE
 // ======================================================
 
@@ -374,20 +503,22 @@ async function sendScannedCoins(coins) {
         const chunk =
             coins.slice(i, i + 25);
 
-        const coinList = chunk.map(
-            (coin, index) =>
-                `${i + index + 1}. ${coin.symbol}`
-        ).join('\n');
+        const coinList =
+            chunk.map(
+                (coin, index) =>
+                    `${i + index + 1}. ${coin.symbol}`
+            ).join('\n');
 
         const message = `
 📊 BITGET SCANNED COINS
 
-Market: USDT Perpetual
-Timeframe: 1W
+🏦 Market: USDT Perpetual
 
-Total Coins: ${coins.length}
+⏰ Timeframe: 1W
 
-Message: ${Math.floor(i / 25) + 1}/${totalChunks}
+🪙 Total Coins: ${coins.length}
+
+📋 List: ${Math.floor(i / 25) + 1}/${totalChunks}
 
 ━━━━━━━━━━━━━━━━━━━━
 
@@ -395,12 +526,15 @@ ${coinList}
 
 ━━━━━━━━━━━━━━━━━━━━
 
-Indicator: RSI Primed [ChartPrime]
-Length: ${RSI_LENGTH}
-Smoothing: ${RSI_SMOOTHING}
+📈 RSI Primed [ChartPrime]
 
-🟢 BUY: RSI 0–30
-🔴 SELL: RSI 70–100
+Length: 35
+Smoothing: 3
+Auto MA Multiplier: 1
+
+🟢 BUY: RSI reversal from 0–30
+
+🔴 SELL: RSI reversal from 70–100
 `;
 
         await bot.sendMessage(
@@ -415,6 +549,7 @@ Smoothing: ${RSI_SMOOTHING}
 
 // ======================================================
 // ANALYZE COIN
+// WEEKLY RSI REVERSAL
 // ======================================================
 
 async function analyzeCoin(coin) {
@@ -423,7 +558,9 @@ async function analyzeCoin(coin) {
 
     try {
 
-        // Fetch weekly candles
+        // ==================================================
+        // FETCH WEEKLY CANDLES
+        // ==================================================
 
         const candles =
             await exchange.fetchOHLCV(
@@ -440,7 +577,9 @@ async function analyzeCoin(coin) {
             return false;
         }
 
-        // Last completed weekly candle
+        // ==================================================
+        // CLOSED CANDLE INDEXES
+        // ==================================================
 
         const lastClosedIndex =
             candles.length - 2;
@@ -448,7 +587,12 @@ async function analyzeCoin(coin) {
         const previousClosedIndex =
             candles.length - 3;
 
-        // OHLC values
+        const olderClosedIndex =
+            candles.length - 4;
+
+        // ==================================================
+        // OHLC DATA
+        // ==================================================
 
         const opens =
             candles.map(c => Number(c[1]));
@@ -467,12 +611,16 @@ async function analyzeCoin(coin) {
 
         if (
             [...opens, ...highs, ...lows, ...closes]
-                .some(value => !Number.isFinite(value))
+                .some(
+                    value => !Number.isFinite(value)
+                )
         ) {
             return false;
         }
 
-        // RSI Primed Candle values
+        // ==================================================
+        // RSI PRIMED CANDLE
+        // ==================================================
 
         const rsiOpen =
             calculateRSIPrimed(opens);
@@ -495,46 +643,101 @@ async function analyzeCoin(coin) {
             return false;
         }
 
-        // Latest completed RSI candle
+        // ==================================================
+        // RSI VALUES - THREE CLOSED WEEKS
+        // ==================================================
 
-        const lastRSI =
-            rsiClose[lastClosedIndex];
+        const olderRSI =
+            rsiClose[olderClosedIndex];
 
         const previousRSI =
             rsiClose[previousClosedIndex];
 
-        const lastRSIOpen =
+        const currentRSI =
+            rsiClose[lastClosedIndex];
+
+        // Latest RSI candle OHLC
+
+        const currentRSIOpen =
             rsiOpen[lastClosedIndex];
 
-        const lastRSIHigh =
+        const currentRSIHigh =
             rsiHigh[lastClosedIndex];
 
-        const lastRSILow =
+        const currentRSILow =
             rsiLow[lastClosedIndex];
 
         if (
-            !Number.isFinite(lastRSI) ||
-            !Number.isFinite(previousRSI)
+            ![
+                olderRSI,
+                previousRSI,
+                currentRSI,
+                currentRSIOpen,
+                currentRSIHigh,
+                currentRSILow
+            ].every(Number.isFinite)
         ) {
             return false;
         }
 
         // ==================================================
-        // SIGNAL CONDITIONS
-        // Alert when RSI ENTERS the zone
+        // BUY CONDITION
+        //
+        // Example:
+        // 35 -> 30 -> 25 -> 20 -> 10 -> 12
+        //
+        // Previous RSI must be <= 30
+        // Previous RSI must be falling
+        // Current RSI must turn upward
+        // Current RSI must remain <= 30
         // ==================================================
 
         const buySignal =
-            previousRSI > BUY_LEVEL &&
-            lastRSI <= BUY_LEVEL;
+
+            previousRSI <= BUY_LEVEL &&
+
+            olderRSI > previousRSI &&
+
+            currentRSI > previousRSI &&
+
+            currentRSI <= BUY_LEVEL;
+
+        // ==================================================
+        // SELL CONDITION
+        //
+        // Example:
+        // 65 -> 70 -> 80 -> 90 -> 85
+        //
+        // Previous RSI must be >= 70
+        // Previous RSI must be rising
+        // Current RSI must turn downward
+        // Current RSI must remain >= 70
+        // ==================================================
 
         const sellSignal =
-            previousRSI < SELL_LEVEL &&
-            lastRSI >= SELL_LEVEL;
 
-        if (!buySignal && !sellSignal) {
+            previousRSI >= SELL_LEVEL &&
+
+            olderRSI < previousRSI &&
+
+            currentRSI < previousRSI &&
+
+            currentRSI >= SELL_LEVEL;
+
+        // ==================================================
+        // NO SIGNAL
+        // ==================================================
+
+        if (
+            !buySignal &&
+            !sellSignal
+        ) {
             return false;
         }
+
+        // ==================================================
+        // SIGNAL SIDE
+        // ==================================================
 
         const side =
             buySignal ? 'BUY' : 'SELL';
@@ -543,7 +746,7 @@ async function analyzeCoin(coin) {
             buySignal ? '🟢' : '🔴';
 
         // ==================================================
-        // PERSISTENT DUPLICATE PROTECTION
+        // DUPLICATE PROTECTION
         // ==================================================
 
         const candleTimestamp =
@@ -561,20 +764,24 @@ async function analyzeCoin(coin) {
         }
 
         // ==================================================
-        // COIN DETAILS
+        // COIN
         // ==================================================
 
         const base = coin.base;
+
+        // ==================================================
+        // TRADINGVIEW LINK
+        // ==================================================
 
         const tradingViewUrl =
             `https://www.tradingview.com/chart/?symbol=BITGET:${base}USDT.P`;
 
         // ==================================================
-        // TELEGRAM SIGNAL
+        // TELEGRAM SIGNAL MESSAGE
         // ==================================================
 
         const message = `
-${emoji} *RSI PRIMED ${side} SIGNAL*
+${emoji} *RSI PRIMED ${side} REVERSAL*
 
 ━━━━━━━━━━━━━━━━━━━━
 
@@ -588,7 +795,7 @@ ${emoji} *RSI PRIMED ${side} SIGNAL*
 
 📊 *INDICATOR SETTINGS*
 
-RSI Primed [ChartPrime]
+Indicator: RSI Primed [ChartPrime]
 
 Style: Candle
 
@@ -600,47 +807,63 @@ Auto MA Multiplier: ${RSI_AUTO_MA_MULTIPLIER}
 
 ━━━━━━━━━━━━━━━━━━━━
 
-📈 *PREVIOUS CLOSED WEEK*
+📈 *THREE CLOSED WEEKLY RSI VALUES*
 
-RSI Close:
+Older RSI:
+${olderRSI.toFixed(4)}
+
+Previous RSI:
 ${previousRSI.toFixed(4)}
 
-━━━━━━━━━━━━━━━━━━━━
-
-📈 *LATEST CLOSED WEEK*
-
-RSI Open:
-${lastRSIOpen.toFixed(4)}
-
-RSI High:
-${lastRSIHigh.toFixed(4)}
-
-RSI Low:
-${lastRSILow.toFixed(4)}
-
-RSI Close:
-${lastRSI.toFixed(4)}
+Current RSI:
+${currentRSI.toFixed(4)}
 
 ━━━━━━━━━━━━━━━━━━━━
 
-${emoji} *${side} CONDITION*
+📊 *CURRENT RSI CANDLE*
+
+Open:
+${currentRSIOpen.toFixed(4)}
+
+High:
+${currentRSIHigh.toFixed(4)}
+
+Low:
+${currentRSILow.toFixed(4)}
+
+Close:
+${currentRSI.toFixed(4)}
+
+━━━━━━━━━━━━━━━━━━━━
+
+${emoji} *${side} REVERSAL CONFIRMED*
 
 ${
     side === 'BUY'
-        ? 'Previous RSI > 30\nLatest RSI ≤ 30'
-        : 'Previous RSI < 70\nLatest RSI ≥ 70'
+        ? `RSI was falling below 30.
+Previous RSI: ${previousRSI.toFixed(2)}
+Current RSI: ${currentRSI.toFixed(2)}
+RSI has turned upward.`
+        : `RSI was rising above 70.
+Previous RSI: ${previousRSI.toFixed(2)}
+Current RSI: ${currentRSI.toFixed(2)}
+RSI has turned downward.`
 }
 
 ━━━━━━━━━━━━━━━━━━━━
 
-✅ Weekly candle CLOSED
+✅ Three closed weekly candles checked
 
-✅ RSI Primed calculation
+✅ RSI reversal confirmed
 
 ✅ Bitget USDT Perpetual
 
 🔗 [Open TradingView Chart](${tradingViewUrl})
 `;
+
+        // ==================================================
+        // SEND TELEGRAM FIRST
+        // ==================================================
 
         await bot.sendMessage(
             chatId,
@@ -651,15 +874,23 @@ ${
             }
         );
 
-        // Save only after successful Telegram delivery
+        // ==================================================
+        // SAVE ONLY AFTER SUCCESSFUL DELIVERY
+        // ==================================================
 
         sentSignals.add(key);
 
         await saveSignalHistory();
 
-        console.log(
-            `SIGNAL: ${symbol} | ${side} | RSI ${lastRSI.toFixed(2)}`
-        );
+        console.log('');
+        console.log('==============================');
+        console.log('RSI REVERSAL SIGNAL');
+        console.log(`Coin: ${symbol}`);
+        console.log(`Side: ${side}`);
+        console.log(`Older RSI: ${olderRSI.toFixed(2)}`);
+        console.log(`Previous RSI: ${previousRSI.toFixed(2)}`);
+        console.log(`Current RSI: ${currentRSI.toFixed(2)}`);
+        console.log('==============================');
 
         return true;
 
@@ -683,21 +914,25 @@ async function run() {
     const startTime = Date.now();
 
     let totalSignals = 0;
+
     let scanned = 0;
+
     let failed = 0;
 
     try {
 
         console.log('');
         console.log('==========================================');
-        console.log('BITGET WEEKLY RSI PRIMED SCANNER');
+        console.log('BITGET WEEKLY RSI PRIMED REVERSAL SCANNER');
         console.log('==========================================');
 
-        // Load old signal history
+        // Load history
 
         await loadSignalHistory();
 
-        // Get top 100 coins
+        // ==================================================
+        // GET TOP 100 COINS
+        // ==================================================
 
         const coins =
             await getBitgetCoins();
@@ -712,15 +947,19 @@ async function run() {
             return;
         }
 
-        // Send full coin list to Telegram
+        // ==================================================
+        // SEND ALL SCANNED COINS
+        // ==================================================
 
         await sendScannedCoins(coins);
 
-        // Scanner started
+        // ==================================================
+        // START MESSAGE
+        // ==================================================
 
         await bot.sendMessage(
             chatId,
-            `🚀 *WEEKLY RSI PRIMED SCANNER STARTED*
+            `🚀 *WEEKLY RSI PRIMED REVERSAL SCANNER STARTED*
 
 ━━━━━━━━━━━━━━━━━━━━
 
@@ -734,7 +973,7 @@ async function run() {
 
 ━━━━━━━━━━━━━━━━━━━━
 
-📈 RSI Primed [ChartPrime]
+📈 *RSI PRIMED CHARTPRIME*
 
 Length: 35
 
@@ -744,9 +983,13 @@ Auto MA Multiplier: 1
 
 ━━━━━━━━━━━━━━━━━━━━
 
-🟢 BUY: RSI enters 0–30
+🟢 *BUY*
 
-🔴 SELL: RSI enters 70–100
+RSI falls below 30 and turns upward.
+
+🔴 *SELL*
+
+RSI rises above 70 and turns downward.
 
 ━━━━━━━━━━━━━━━━━━━━
 
@@ -782,7 +1025,7 @@ Only completed weekly candles.`,
                 failed++;
 
                 console.error(
-                    `Scan failed: ${coin.symbol}`,
+                    `Failed: ${coin.symbol}`,
                     error.message
                 );
             }
@@ -791,11 +1034,17 @@ Only completed weekly candles.`,
         }
 
         // ==================================================
-        // SCAN SUMMARY
+        // SCAN DURATION
         // ==================================================
 
         const duration =
-            ((Date.now() - startTime) / 1000).toFixed(1);
+            (
+                (Date.now() - startTime) / 1000
+            ).toFixed(1);
+
+        // ==================================================
+        // FINAL SUMMARY
+        // ==================================================
 
         const summary = `
 ✅ *WEEKLY RSI PRIMED SCAN FINISHED*
@@ -822,15 +1071,17 @@ Only completed weekly candles.`,
 
 📈 *RSI PRIMED SETTINGS*
 
-Length: 35
+Length: ${RSI_LENGTH}
 
-Smoothing: 3
+Smoothing: ${RSI_SMOOTHING}
 
-Auto MA Multiplier: 1
+Auto MA Multiplier: ${RSI_AUTO_MA_MULTIPLIER}
 
-🟢 BUY: Enters 0–30
+━━━━━━━━━━━━━━━━━━━━
 
-🔴 SELL: Enters 70–100
+🟢 BUY: RSI turns upward inside 0–30
+
+🔴 SELL: RSI turns downward inside 70–100
 
 ━━━━━━━━━━━━━━━━━━━━
 
@@ -857,7 +1108,10 @@ Auto MA Multiplier: 1
 
     } catch (error) {
 
-        console.error('RUN ERROR:', error);
+        console.error(
+            'RUN ERROR:',
+            error
+        );
 
         try {
 
@@ -882,7 +1136,8 @@ Auto MA Multiplier: 1
 }
 
 // ======================================================
-// START - ONE SCAN PER GITHUB ACTION
+// START
+// ONE SCAN PER GITHUB ACTION
 // ======================================================
 
 run();
