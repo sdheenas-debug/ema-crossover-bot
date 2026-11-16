@@ -20,17 +20,22 @@ const BUY_LEVEL = 30;
 const SELL_LEVEL = 70;
 
 const HISTORY_WEEKS = 180;
-const CANDLE_LIMIT = 200;
-const MIN_COMPLETED_CANDLES = 50;
+const CANDLE_LIMIT = 100;
+const MAX_CANDLE_PAGES = 5;
+const MIN_COMPLETED_CANDLES = 45;
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 
 if (!TELEGRAM_TOKEN || !CHAT_ID) {
-    throw new Error("Missing TELEGRAM_TOKEN or CHAT_ID GitHub Secrets");
+    throw new Error(
+        "Missing TELEGRAM_TOKEN or CHAT_ID GitHub Secrets"
+    );
 }
 
-const bot = new TelegramBot(TELEGRAM_TOKEN);
+// ==========================================
+// EXCHANGE
+// ==========================================
 
 const bitget = new ccxt.bitget({
     enableRateLimit: true,
@@ -40,19 +45,12 @@ const bitget = new ccxt.bitget({
     }
 });
 
-const binance = new ccxt.binance({
-    enableRateLimit: true,
-    timeout: 30000,
-    options: {
-        defaultType: "spot"
-    }
-});
+const bot = new TelegramBot(TELEGRAM_TOKEN);
 
 // ==========================================
 // EXCLUSIONS
 // ==========================================
 
-// Known stablecoin bases
 const STABLECOIN_BASES = new Set([
     "USDT", "USDC", "BUSD", "DAI", "TUSD",
     "FDUSD", "USDE", "USDS", "USDD", "USDP",
@@ -61,8 +59,9 @@ const STABLECOIN_BASES = new Set([
     "XAUT", "PAXG"
 ]);
 
-// Known non-crypto / tokenized traditional assets.
-// This is a manual exclusion list, not a complete asset classifier.
+// Known traditional-asset and tokenized-asset symbols.
+// This blacklist is not a complete crypto asset classifier.
+
 const NON_CRYPTO_BASES = new Set([
     "SPY", "QQQ", "TSLA", "AAPL", "NVDA",
     "MSFT", "AMZN", "META", "GOOGL", "GOOG",
@@ -78,7 +77,7 @@ function isLeveragedToken(base) {
     return /(\d+[LS]|UP|DOWN|BULL|BEAR)$/i.test(base);
 }
 
-function isAllowedCryptoMarket(market) {
+function isAllowedSpotMarket(market) {
     const base = String(market.base || "").toUpperCase();
 
     if (market.spot !== true) return false;
@@ -88,6 +87,8 @@ function isAllowedCryptoMarket(market) {
 
     if (market.quote !== "USDT") return false;
     if (market.active === false) return false;
+
+    if (!base) return false;
 
     if (STABLECOIN_BASES.has(base)) return false;
     if (NON_CRYPTO_BASES.has(base)) return false;
@@ -107,7 +108,9 @@ async function sendTelegram(message) {
         await bot.sendMessage(
             CHAT_ID,
             message.slice(i, i + MAX_LENGTH),
-            { disable_web_page_preview: true }
+            {
+                disable_web_page_preview: true
+            }
         );
     }
 }
@@ -117,7 +120,10 @@ async function sendTelegram(message) {
 // ==========================================
 
 const STATE_DIR = ".signal-state";
-const STATE_FILE = path.join(STATE_DIR, "sent-signals.json");
+const STATE_FILE = path.join(
+    STATE_DIR,
+    "sent-signals.json"
+);
 
 function loadSignalHistory() {
     try {
@@ -125,14 +131,18 @@ function loadSignalHistory() {
             return {};
         }
 
-        return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+        return JSON.parse(
+            fs.readFileSync(STATE_FILE, "utf8")
+        );
     } catch {
         return {};
     }
 }
 
 function saveSignalHistory(history) {
-    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.mkdirSync(STATE_DIR, {
+        recursive: true
+    });
 
     fs.writeFileSync(
         STATE_FILE,
@@ -152,10 +162,11 @@ async function getBitgetTopCoins() {
     const tickers = await bitget.fetchTickers();
 
     const coins = Object.values(bitget.markets)
-        .filter(market => isAllowedCryptoMarket(market))
+        .filter(market => isAllowedSpotMarket(market))
         .map(market => {
-            // Define base inside map scope
-            const base = String(market.base || "").toUpperCase();
+            const base = String(
+                market.base || ""
+            ).toUpperCase();
 
             const ticker = tickers[market.symbol];
 
@@ -192,69 +203,69 @@ async function getBitgetTopCoins() {
         .sort((a, b) => b.volume24h - a.volume24h)
         .slice(0, MAX_COINS);
 
-    console.log(`Bitget Spot Top coins: ${coins.length}`);
+    console.log(
+        `Bitget Spot Top coins: ${coins.length}`
+    );
 
     return coins;
 }
 
 // ==========================================
-// BINANCE SPOT MATCHING
+// BITGET SPOT MARKET VALIDATION
 // ==========================================
 
-async function getBinanceSpotMarkets() {
-    console.log("Loading Binance Spot markets...");
+async function validateBitgetMarkets(coins) {
+    const validMarkets = new Map();
 
-    await binance.loadMarkets();
+    for (const market of Object.values(bitget.markets)) {
+        if (!isAllowedSpotMarket(market)) continue;
 
-    const marketMap = new Map();
+        const base = String(
+            market.base || ""
+        ).toUpperCase();
 
-    for (const market of Object.values(binance.markets)) {
-        if (market.spot !== true) continue;
-        if (market.swap === true) continue;
-        if (market.future === true) continue;
-        if (market.option === true) continue;
+        if (market.symbol !== `${base}/USDT`) {
+            continue;
+        }
 
-        if (market.quote !== "USDT") continue;
-        if (market.active === false) continue;
-
-        const base = String(market.base || "").toUpperCase();
-
-        if (!base) continue;
-
-        // Only exact BASE/USDT spot pair
-        if (market.symbol !== `${base}/USDT`) continue;
-
-        if (!marketMap.has(base)) {
-            marketMap.set(base, market.symbol);
+        if (!validMarkets.has(base)) {
+            validMarkets.set(base, market.symbol);
         }
     }
 
-    return marketMap;
+    return coins.map(coin => ({
+        ...coin,
+        matched: validMarkets.has(coin.base),
+        spotSymbol: validMarkets.get(coin.base) || null
+    }));
 }
 
 // ==========================================
 // CHEBYSHEV TYPE I FILTER
-// ChartPrime calculation
+// ChartPrime formula
 // ==========================================
 
-function chebyshevI(source, length, ripple = 0.5) {
-    if (!Number.isFinite(length) || length <= 0) {
-        throw new Error("Invalid Chebyshev length");
-    }
-
+function chebyshevGain(length, ripple = 0.5) {
     const a = Math.cosh(
-        (1 / length) * Math.acosh(1 / (1 - ripple))
+        (1 / length) *
+        Math.acosh(1 / (1 - ripple))
     );
 
     const b = Math.sinh(
-        (1 / length) * Math.asinh(1 / ripple)
+        (1 / length) *
+        Math.asinh(1 / ripple)
     );
 
     return (a - b) / (a + b);
 }
 
-function applyChebyshevFilter(values, length, ripple = 0.5) {
-    const g = chebyshevI(length, length, ripple);
+function applyChebyshevFilter(
+    values,
+    length,
+    ripple = 0.5
+) {
+    const g = chebyshevGain(length, ripple);
+
     const output = [];
 
     let previous = 0;
@@ -263,8 +274,9 @@ function applyChebyshevFilter(values, length, ripple = 0.5) {
         if (!Number.isFinite(value)) {
             output.push(null);
 
-            // Pine nz(previous[1]) becomes zero after na
+            // Pine nz(previous[1]) behavior
             previous = 0;
+
             continue;
         }
 
@@ -273,6 +285,7 @@ function applyChebyshevFilter(values, length, ripple = 0.5) {
             g * previous;
 
         output.push(current);
+
         previous = current;
     }
 
@@ -283,8 +296,12 @@ function applyChebyshevFilter(values, length, ripple = 0.5) {
 // CHARTPRIME RSI
 // ==========================================
 
-function chartPrimeRSI(source, length, smoothing) {
-    // First filter the source
+function chartPrimeRSI(
+    source,
+    length,
+    smoothing
+) {
+    // Filter original source
     const filteredSource = applyChebyshevFilter(
         source,
         smoothing,
@@ -294,7 +311,11 @@ function chartPrimeRSI(source, length, smoothing) {
     const up = [];
     const down = [];
 
-    for (let i = 0; i < filteredSource.length; i++) {
+    for (
+        let i = 0;
+        i < filteredSource.length;
+        i++
+    ) {
         if (
             i === 0 ||
             filteredSource[i] === null ||
@@ -302,23 +323,27 @@ function chartPrimeRSI(source, length, smoothing) {
         ) {
             up.push(null);
             down.push(null);
+
             continue;
         }
 
         const change =
-            filteredSource[i] - filteredSource[i - 1];
+            filteredSource[i] -
+            filteredSource[i - 1];
 
         up.push(Math.max(change, 0));
+
         down.push(Math.max(-change, 0));
     }
 
-    // Filter upward and downward movements
+    // Filter upward movement
     const upFiltered = applyChebyshevFilter(
         up,
         length,
         0.5
     );
 
+    // Filter downward movement
     const downFiltered = applyChebyshevFilter(
         down,
         length,
@@ -327,17 +352,23 @@ function chartPrimeRSI(source, length, smoothing) {
 
     const rsi = [];
 
-    for (let i = 0; i < upFiltered.length; i++) {
+    for (
+        let i = 0;
+        i < upFiltered.length;
+        i++
+    ) {
         const u = upFiltered[i];
         const d = downFiltered[i];
 
         if (u === null || d === null) {
             rsi.push(null);
+
             continue;
         }
 
         if (d === 0) {
             rsi.push(100);
+
             continue;
         }
 
@@ -392,53 +423,101 @@ function calculateChartPrimeOHLC(candles) {
 }
 
 // ==========================================
-// BINANCE COMPLETED WEEKLY CANDLES
+// FETCH BITGET WEEKLY CANDLES
+// WITH PAGINATION
 // ==========================================
 
 async function getWeeklyCandles(symbol) {
-    const since =
+    const initialSince =
         Date.now() -
         HISTORY_WEEKS * WEEK_MS;
 
-    const candles = await binance.fetchOHLCV(
-        symbol,
-        TIMEFRAME,
-        since,
-        CANDLE_LIMIT
-    );
+    let cursor = initialSince;
 
-    if (!Array.isArray(candles)) {
-        throw new Error("Invalid candle response");
+    const candleMap = new Map();
+
+    for (
+        let page = 0;
+        page < MAX_CANDLE_PAGES;
+        page++
+    ) {
+        console.log(
+            `${symbol}: Fetching weekly page ${page + 1}`
+        );
+
+        const batch = await bitget.fetchOHLCV(
+            symbol,
+            TIMEFRAME,
+            cursor,
+            CANDLE_LIMIT
+        );
+
+        if (!Array.isArray(batch) || batch.length === 0) {
+            break;
+        }
+
+        let newestTimestamp = cursor - 1;
+
+        for (const candle of batch) {
+            if (!Array.isArray(candle) || candle.length < 6) {
+                continue;
+            }
+
+            const timestamp = Number(candle[0]);
+
+            if (!Number.isFinite(timestamp)) {
+                continue;
+            }
+
+            newestTimestamp = Math.max(
+                newestTimestamp,
+                timestamp
+            );
+
+            const values = candle
+                .slice(1, 6)
+                .map(Number);
+
+            if (!values.every(Number.isFinite)) {
+                continue;
+            }
+
+            candleMap.set(timestamp, [
+                timestamp,
+                ...values
+            ]);
+        }
+
+        // Stop if the API did not return newer candles
+        if (newestTimestamp < cursor) {
+            break;
+        }
+
+        const nextCursor =
+            newestTimestamp + WEEK_MS;
+
+        if (nextCursor <= cursor) {
+            break;
+        }
+
+        cursor = nextCursor;
+
+        // Reached the current period
+        if (newestTimestamp + WEEK_MS > Date.now()) {
+            break;
+        }
     }
 
     const now = Date.now();
 
-    const unique = new Map();
-
-    for (const candle of candles) {
-        if (!Array.isArray(candle) || candle.length < 6) {
-            continue;
-        }
-
-        const timestamp = Number(candle[0]);
-
-        if (!Number.isFinite(timestamp)) continue;
-
-        // Exclude currently forming weekly candle
-        if (timestamp + WEEK_MS > now) continue;
-
-        const values = candle.slice(1, 6).map(Number);
-
-        if (!values.every(Number.isFinite)) continue;
-
-        unique.set(timestamp, [
-            timestamp,
-            ...values
-        ]);
-    }
-
-    return [...unique.values()]
+    const completed = [...candleMap.values()]
+        .filter(candle => {
+            // Weekly candle must be fully closed
+            return candle[0] + WEEK_MS <= now;
+        })
         .sort((a, b) => a[0] - b[0]);
+
+    return completed;
 }
 
 // ==========================================
@@ -446,6 +525,10 @@ async function getWeeklyCandles(symbol) {
 // ==========================================
 
 function detectReversal(rsiValues) {
+    if (!Array.isArray(rsiValues)) {
+        return null;
+    }
+
     const values = rsiValues.filter(
         value => Number.isFinite(value)
     );
@@ -454,11 +537,14 @@ function detectReversal(rsiValues) {
         return null;
     }
 
-    const current = values[values.length - 1];
-    const previous = values[values.length - 2];
+    const current =
+        values[values.length - 1];
 
-    // BUY:
-    // RSI is still <= 30 and turns upward.
+    const previous =
+        values[values.length - 2];
+
+    // BUY REVERSAL
+    // RSI <= 30 and turns upward
     if (
         current <= BUY_LEVEL &&
         previous <= BUY_LEVEL &&
@@ -478,10 +564,10 @@ function detectReversal(rsiValues) {
             values.length - 1
         );
 
-        const lowest = Math.min(...previousSegment);
+        const lowest = Math.min(
+            ...previousSegment
+        );
 
-        // Alert only on the first upward reversal
-        // from the lowest point of the oversold segment.
         if (previous <= lowest + 1e-10) {
             return {
                 type: "BUY",
@@ -491,8 +577,8 @@ function detectReversal(rsiValues) {
         }
     }
 
-    // SELL:
-    // RSI is still >= 70 and turns downward.
+    // SELL REVERSAL
+    // RSI >= 70 and turns downward
     if (
         current >= SELL_LEVEL &&
         previous >= SELL_LEVEL &&
@@ -512,10 +598,10 @@ function detectReversal(rsiValues) {
             values.length - 1
         );
 
-        const highest = Math.max(...previousSegment);
+        const highest = Math.max(
+            ...previousSegment
+        );
 
-        // Alert only on the first downward reversal
-        // from the highest point of the overbought segment.
         if (previous >= highest - 1e-10) {
             return {
                 type: "SELL",
@@ -529,13 +615,14 @@ function detectReversal(rsiValues) {
 }
 
 // ==========================================
-// RSI ZONES
+// RSI ZONE
 // ==========================================
 
 function getRSIZone(value) {
     if (value <= 30) return "OVERSOLD";
     if (value < 50) return "BEARISH";
     if (value < 70) return "BULLISH";
+
     return "OVERBOUGHT";
 }
 
@@ -544,64 +631,72 @@ function formatNumber(value) {
 }
 
 function formatVolume(value) {
-    return "$" + Number(value).toLocaleString("en-US", {
-        maximumFractionDigits: 0
-    });
+    return "$" + Number(value).toLocaleString(
+        "en-US",
+        {
+            maximumFractionDigits: 0
+        }
+    );
+}
+
+function formatDate(timestamp) {
+    return new Date(timestamp).toISOString().slice(0, 10);
 }
 
 // ==========================================
 // SCAN ONE COIN
 // ==========================================
 
-async function scanCoin(coin, binanceMarkets) {
-    const binanceSymbol = binanceMarkets.get(coin.base);
-
-    if (!binanceSymbol) {
+async function scanCoin(coin) {
+    if (!coin.matched || !coin.spotSymbol) {
         return {
             ...coin,
-            matched: false,
             valid: false,
-            reason: "No exact Binance Spot BASE/USDT pair"
+            reason: "Bitget Spot pair unavailable"
         };
     }
 
-    const candles = await getWeeklyCandles(binanceSymbol);
+    const candles = await getWeeklyCandles(
+        coin.spotSymbol
+    );
 
     if (candles.length < MIN_COMPLETED_CANDLES) {
         return {
             ...coin,
-            matched: true,
-            binanceSymbol,
             valid: false,
-            reason: `Insufficient completed candles: ${candles.length}`
+            candles: candles.length,
+            reason:
+                `Insufficient completed weekly candles: ${candles.length}`
         };
     }
 
-    const rsiData = calculateChartPrimeOHLC(candles);
+    const rsiData = calculateChartPrimeOHLC(
+        candles
+    );
 
     const rsi = rsiData.close;
-    const currentRSI = rsi[rsi.length - 1];
 
-    if (!Number.isFinite(currentRSI)) {
+    const currentRSI = rsi[rsi.length - 1];
+    const previousRSI = rsi[rsi.length - 2];
+
+    if (
+        !Number.isFinite(currentRSI) ||
+        !Number.isFinite(previousRSI)
+    ) {
         return {
             ...coin,
-            matched: true,
-            binanceSymbol,
             valid: false,
             reason: "Invalid ChartPrime RSI"
         };
     }
 
-    const previousRSI = rsi[rsi.length - 2];
-
     const signal = detectReversal(rsi);
 
-    const lastCandle = candles[candles.length - 1];
+    const lastCandle =
+        candles[candles.length - 1];
 
     return {
         ...coin,
-        matched: true,
-        binanceSymbol,
         valid: true,
         candles: candles.length,
         rsi: currentRSI,
@@ -613,49 +708,77 @@ async function scanCoin(coin, binanceMarkets) {
 }
 
 // ==========================================
+// ZONE REPORT
+// ==========================================
+
+function zoneText(title, coins) {
+    const lines = [
+        `${title} (${coins.length})`
+    ];
+
+    for (const coin of coins) {
+        lines.push(
+            `${coin.base}: ${formatNumber(coin.rsi)}`
+        );
+    }
+
+    return lines.join("\n");
+}
+
+// ==========================================
 // MAIN SCANNER
 // ==========================================
 
 async function main() {
     const startTime = Date.now();
 
-    console.log("Starting Bitget Spot + Binance Spot scanner");
+    console.log(
+        "Starting Bitget Spot ChartPrime RSI Scanner"
+    );
 
     await sendTelegram(
-        "🚀 SPOT RSI SCANNER STARTED\n\n" +
-        "Ranking: Bitget Spot Top 100\n" +
-        "RSI Data: Binance Spot\n" +
+        "🚀 BITGET SPOT RSI SCANNER STARTED\n\n" +
+        "Exchange: Bitget Spot ONLY\n" +
+        "Ranking: Top 100 by 24H USDT volume\n" +
         "Timeframe: Weekly (1W)\n" +
-        "RSI: ChartPrime Primed\n" +
+        "Indicator: ChartPrime RSI Primed calculation\n" +
         "Length: 35\n" +
         "Smoothing: 3\n" +
-        "BUY: Oversold reversal <= 30\n" +
-        "SELL: Overbought reversal >= 70\n" +
-        "Candle: Completed weekly only"
+        "BUY: RSI <= 30 reversal upward\n" +
+        "SELL: RSI >= 70 reversal downward\n" +
+        "Candle: Completed weekly only\n" +
+        "Futures: Disabled\n" +
+        "Binance: Disabled"
     );
 
     const history = loadSignalHistory();
 
+    // Step 1: Get Top 100
     const topCoins = await getBitgetTopCoins();
 
-    const binanceMarkets = await getBinanceSpotMarkets();
+    // Step 2: Validate exact Spot BASE/USDT pairs
+    const matchedCoins = await validateBitgetMarkets(
+        topCoins
+    );
 
+    // Step 3: Scan coins
     const results = [];
 
     let errors = 0;
 
-    for (let i = 0; i < topCoins.length; i++) {
-        const coin = topCoins[i];
+    for (
+        let i = 0;
+        i < matchedCoins.length;
+        i++
+    ) {
+        const coin = matchedCoins[i];
 
         console.log(
-            `[${i + 1}/${topCoins.length}] ${coin.base}`
+            `[${i + 1}/${matchedCoins.length}] ${coin.base}`
         );
 
         try {
-            const result = await scanCoin(
-                coin,
-                binanceMarkets
-            );
+            const result = await scanCoin(coin);
 
             results.push(result);
 
@@ -668,7 +791,6 @@ async function main() {
 
             results.push({
                 ...coin,
-                matched: binanceMarkets.has(coin.base),
                 valid: false,
                 reason: error.message
             });
@@ -681,12 +803,12 @@ async function main() {
 
     const topReport = [
         "📊 BITGET SPOT TOP 100",
-        "Ranking: 24H Quote Volume",
-        "RSI Source: Binance Spot",
+        "Ranking: 24H USDT Volume",
+        "RSI Source: Bitget Spot",
         "--------------------------------"
     ];
 
-    for (const result of results) {
+    results.forEach((result, index) => {
         const status = result.matched
             ? "MATCHED"
             : "UNMATCHED";
@@ -696,16 +818,18 @@ async function main() {
             : "RSI N/A";
 
         topReport.push(
-            `#${results.indexOf(result) + 1} ${result.base} | ` +
+            `#${index + 1} ${result.base} | ` +
             `${status} | ${rsiText} | ` +
             `${formatVolume(result.volume24h)}`
         );
-    }
+    });
 
-    await sendTelegram(topReport.join("\n"));
+    await sendTelegram(
+        topReport.join("\n")
+    );
 
     // ======================================
-    // RSI ZONE REPORT
+    // RSI REPORT
     // ======================================
 
     const validResults = results.filter(
@@ -727,20 +851,6 @@ async function main() {
     const overbought = validResults.filter(
         result => result.rsi >= 70
     );
-
-    function zoneText(title, coins) {
-        const lines = [
-            `${title} (${coins.length})`
-        ];
-
-        for (const coin of coins) {
-            lines.push(
-                `${coin.base}: ${formatNumber(coin.rsi)}`
-            );
-        }
-
-        return lines.join("\n");
-    }
 
     const zoneReport = [
         "📈 CHARTPRIME RSI REPORT",
@@ -775,7 +885,7 @@ async function main() {
 
         if (history[signalKey]) continue;
 
-        const signalMessage = [
+        const message = [
             type === "BUY"
                 ? "🟢 CHARTPRIME BUY REVERSAL"
                 : "🔴 CHARTPRIME SELL REVERSAL",
@@ -787,14 +897,13 @@ async function main() {
             `RSI Length: ${RSI_LENGTH}`,
             `Smoothing: ${RSI_SMOOTHING}`,
             "Timeframe: 1W",
-            `Completed Candle: ${new Date(result.candleTimestamp).toISOString()}`,
-            `Bitget Volume: ${formatVolume(result.volume24h)}`,
+            `Completed Candle: ${formatDate(result.candleTimestamp)}`,
+            `24H Volume: ${formatVolume(result.volume24h)}`,
             "",
-            "Data: Binance Spot",
-            "Ranking: Bitget Spot"
+            "Exchange: Bitget Spot"
         ].join("\n");
 
-        await sendTelegram(signalMessage);
+        await sendTelegram(message);
 
         history[signalKey] = {
             base: result.base,
@@ -806,7 +915,10 @@ async function main() {
         newSignals.push(result);
     }
 
-    // Keep state file compact
+    // ======================================
+    // CLEAN OLD SIGNAL HISTORY
+    // ======================================
+
     const historyKeys = Object.keys(history);
 
     if (historyKeys.length > 5000) {
@@ -845,15 +957,15 @@ async function main() {
         "🔍 SCANNER DIAGNOSTICS",
         "--------------------------------",
         `Bitget Top Coins: ${topCoins.length}`,
-        `Binance Matched: ${matched}`,
-        `Binance Unmatched: ${unmatched}`,
+        `Spot Matched: ${matched}`,
+        `Spot Unmatched: ${unmatched}`,
         `Valid RSI Results: ${validResults.length}`,
         `Invalid RSI Results: ${invalid}`,
         `API / Scan Errors: ${errors}`,
         `Oversold: ${oversold.length}`,
         `Overbought: ${overbought.length}`,
         `New BUY/SELL Signals: ${newSignals.length}`,
-        `Total Signal History: ${Object.keys(history).length}`,
+        `Signal History: ${Object.keys(history).length}`,
         `Execution Time: ${elapsed} seconds`
     ].join("\n");
 
@@ -861,7 +973,9 @@ async function main() {
 
     console.log(diagnostics);
 
-    console.log("Scanner completed successfully.");
+    console.log(
+        "Bitget Spot scanner completed successfully."
+    );
 }
 
 // ==========================================
@@ -870,12 +984,19 @@ async function main() {
 
 main()
     .catch(async error => {
-        console.error("SCANNER FAILED:", error);
+        console.error(
+            "SCANNER FAILED:",
+            error
+        );
 
         try {
             await sendTelegram(
-                "❌ SPOT RSI SCANNER FAILED\n\n" +
-                String(error.stack || error.message || error)
+                "❌ BITGET SPOT RSI SCANNER FAILED\n\n" +
+                String(
+                    error.stack ||
+                    error.message ||
+                    error
+                )
             );
         } catch (telegramError) {
             console.error(
@@ -889,7 +1010,6 @@ main()
     .finally(async () => {
         try {
             await bitget.close();
-            await binance.close();
         } catch {
             // Ignore exchange shutdown errors
         }
